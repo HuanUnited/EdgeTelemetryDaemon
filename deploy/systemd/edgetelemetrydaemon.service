@@ -1,0 +1,28 @@
+[Unit]
+Description=Edge AI Telemetry Daemon
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=edgetelemetry
+Group=edgetelemetry
+ExecStart=/usr/local/bin/edge-telemetry-daemon
+Restart=always
+RestartSec=5s
+
+# Environment Overrides
+Environment="ETD_LISTEN_ADDR=:8080"
+Environment="ETD_SCRAPE_INTERVAL=5s"
+Environment="ETD_CPU_REPORT_MODE=percent"
+Environment="ETD_LOG_LEVEL=info"
+
+# Security Sandboxing Capabilities
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

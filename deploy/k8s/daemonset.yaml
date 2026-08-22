@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: edge-telemetry-daemon
+  labels:
+    app: edge-telemetry-daemon
+spec:
+  selector:
+    matchLabels:
+      app: edge-telemetry-daemon
+  template:
+    metadata:
+      labels:
+        app: edge-telemetry-daemon
+    spec:
+      containers:
+        - name: agent
+          image: edge-telemetry-daemon:latest
+          env:
+            - name: ETD_PROCFS_PATH
+              value: "/host/proc"
+            - name: ETD_TARGET_URL
+              value: "http://telemetry-sink.monitoring.svc:8080/ingest"
+          ports:
+            - containerPort: 8080
+              name: metrics
+          volumeMounts:
+            - name: host-proc
+              mountPath: /host/proc
+              readOnly: true
+      volumes:
+        - name: host-proc
+          hostPath:
+            path: /proc
