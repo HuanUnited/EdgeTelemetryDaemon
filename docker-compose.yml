@@ -1,0 +1,28 @@
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: edge-telemetry-daemon
+    ports:
+      - "8080:8080"
+    volumes:
+      - /proc:/host/proc:ro
+    environment:
+      - ETD_LISTEN_ADDR=:8080
+      - ETD_SCRAPE_INTERVAL=100ms
+      - ETD_DETECTOR_MIN_SAMPLES=30
+      - ETD_CPU_REPORT_MODE=percent
+      - ETD_LOG_LEVEL=debug
+      - ETD_PROCFS_PATH=/host/proc
+      - ETD_TARGET_URL=http://ingest-sink:80/post
+    depends_on:
+      - ingest-sink
+    restart: unless-stopped
+
+  ingest-sink:
+    image: kennethreitz/httpbin
+    container_name: telemetry-ingest-sink
+    ports:
+      - "8081:80"
+    restart: unless-stopped
