@@ -7,10 +7,10 @@ import (
 
 // SnapshotEntry holds a telemetry measurement context recorded prior to or during an anomaly.
 type SnapshotEntry struct {
-	Timestamp time.Time
-	Value     float64
-	ZScore    float64
-	Anomalous bool
+	Timestamp time.Time `json:"timestamp"`
+	Value     float64   `json:"value"`
+	ZScore    float64   `json:"z_score"`
+	Anomalous bool      `json:"anomalous"`
 }
 
 // RingBuffer provides a fixed-capacity ring buffer for capturing pre-trigger anomaly contexts.

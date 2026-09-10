@@ -13,12 +13,12 @@ import (
 )
 
 func TestDispatcherSuccess(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer ts.Close()
 
-	ob := outbox.NewOutbox(outbox.OutboxConfig{Capacity: 10})
+	ob := outbox.NewOutbox(outbox.Config{Capacity: 10})
 	reg := metrics.NewRegistry()
 	disp := NewDispatcher(DispatcherConfig{
 		TargetURL:      ts.URL,
@@ -42,9 +42,9 @@ func TestDispatcherSuccess(t *testing.T) {
 }
 
 func TestDispatcherRetryAndRecovery(t *testing.T) {
-	var attempts int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		count := atomic.AddInt32(&attempts, 1)
+	var attempts atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		count := attempts.Add(1)
 		if count < 3 {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
@@ -53,7 +53,7 @@ func TestDispatcherRetryAndRecovery(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	ob := outbox.NewOutbox(outbox.OutboxConfig{Capacity: 5})
+	ob := outbox.NewOutbox(outbox.Config{Capacity: 5})
 	reg := metrics.NewRegistry()
 	disp := NewDispatcher(DispatcherConfig{
 		TargetURL:      ts.URL,
@@ -71,7 +71,7 @@ func TestDispatcherRetryAndRecovery(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	if atomic.LoadInt32(&attempts) != 3 {
-		t.Errorf("Expected 3 HTTP attempts (2 retries + 1 success), got %d", atomic.LoadInt32(&attempts))
+	if attempts.Load() != 3 {
+		t.Errorf("Expected 3 HTTP attempts (2 retries + 1 success), got %d", attempts.Load())
 	}
 }

@@ -7,14 +7,14 @@ import (
 
 // HeartbeatSummary contains summary aggregate metrics over a completed heartbeat window.
 type HeartbeatSummary struct {
-	StartTime       time.Time
-	EndTime         time.Time
-	TotalSamples    uint64
-	AnomalousCount  uint64
-	SuppressedCount uint64
-	MinVal          float64
-	MaxVal          float64
-	SumVal          float64
+	StartTime       time.Time `json:"start_time"`
+	EndTime         time.Time `json:"end_time"`
+	TotalSamples    uint64    `json:"total_samples"`
+	AnomalousCount  uint64    `json:"anomalous_count"`
+	SuppressedCount uint64    `json:"suppressed_count"`
+	MinVal          float64   `json:"min_val"`
+	MaxVal          float64   `json:"max_val"`
+	SumVal          float64   `json:"sum_val"`
 }
 
 // HeartbeatAggregator accumulates periodic status metrics between alert triggers.

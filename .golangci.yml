@@ -1,16 +1,3 @@
-# This file is licensed under the terms of the MIT license https://opensource.org/license/mit
-# Copyright (c) 2021-2025 Marat Reimers
-
-## Golden config for golangci-lint v2.7.2
-#
-# This is the best config for golangci-lint based on my experience and opinion.
-# It is very strict, but not extremely strict.
-# Feel free to adapt it to suit your needs.
-# If this config helps you, please consider keeping a link to this repo (see the next comment).
-
-# Based on https://github.com/maratori/golangci-lint-config
-# Taken from https://github.com/nikoksr/assert-go/blob/main/.golangci.yaml
-
 version: "2"
 
 issues:

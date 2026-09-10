@@ -20,7 +20,7 @@ func TestAIGenNextWithinJitter(t *testing.T) {
 	g := NewAIGen(cfg)
 
 	const samples = 1000
-	for i := 0; i < samples; i++ {
+	for range samples {
 		s := g.Next()
 		if s.InferencesPerSec < 100*0.9 || s.InferencesPerSec > 100*1.1 {
 			t.Fatalf("InferencesPerSec = %v, want within [90, 110] (jitter 10%%)", s.InferencesPerSec)
@@ -55,18 +55,16 @@ func TestAIGenConcurrentSafe(t *testing.T) {
 	const perGoroutine = 2000
 
 	var wg sync.WaitGroup
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < perGoroutine; j++ {
+	for range goroutines {
+		wg.Go(func() {
+			for range perGoroutine {
 				s := g.Next()
 				if s.InferencesPerSec <= 0 {
 					t.Errorf("InferencesPerSec = %v, want > 0", s.InferencesPerSec)
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

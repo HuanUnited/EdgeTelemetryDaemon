@@ -33,7 +33,7 @@ func BenchmarkRingBufferPush(b *testing.B) {
 
 func BenchmarkRingBufferSnapshot(b *testing.B) {
 	rb := NewRingBuffer(50)
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		rb.Push(SnapshotEntry{Timestamp: time.Now(), Value: float64(i)})
 	}
 	var buf [50]SnapshotEntry

@@ -38,13 +38,11 @@ type AISample struct {
 
 // AIGen is a stateful generator of synthetic AI inference metrics. It is safe
 // for concurrent use by multiple goroutines.
-//
 // The zero value is not usable; construct instances via NewAIGen.
 type AIGen struct {
 	cfg  AIGenConfig
 	mu   sync.Mutex
 	rand *rand.Rand
-	seq  uint64
 }
 
 // NewAIGen builds an AIGen with the given configuration. Invalid fields are
@@ -61,7 +59,6 @@ func NewAIGen(cfg AIGenConfig) *AIGen {
 	return &AIGen{
 		cfg:  cfg,
 		rand: rand.New(rand.NewPCG(seq, ^seq)),
-		seq:  seq,
 	}
 }
 

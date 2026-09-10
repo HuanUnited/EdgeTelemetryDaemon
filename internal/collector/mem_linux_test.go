@@ -69,7 +69,7 @@ func FuzzParseMemInfo(f *testing.F) {
 	f.Add([]byte("invalid: key value\n"))
 	f.Add([]byte(""))
 
-	f.Fuzz(func(t *testing.T, data []byte) {
+	f.Fuzz(func(_ *testing.T, data []byte) {
 		var out MemStats
 		_ = parseMemInfo(data, &out)
 	})

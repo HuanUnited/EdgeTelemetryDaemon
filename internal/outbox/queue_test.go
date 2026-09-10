@@ -2,13 +2,14 @@ package outbox
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 )
 
 func TestOutboxPushPop(t *testing.T) {
-	ob := NewOutbox(OutboxConfig{Capacity: 5, DropPolicy: DropNewest})
+	ob := NewOutbox(Config{Capacity: 5, DropPolicy: DropNewest})
 	defer ob.Close()
 
 	evt1 := Event{ID: "1", Type: EventAnomalyAlert, Timestamp: time.Now(), Data: []byte("a")}
@@ -40,14 +41,14 @@ func TestOutboxPushPop(t *testing.T) {
 }
 
 func TestOutboxDropNewest(t *testing.T) {
-	ob := NewOutbox(OutboxConfig{Capacity: 2, DropPolicy: DropNewest})
+	ob := NewOutbox(Config{Capacity: 2, DropPolicy: DropNewest})
 	defer ob.Close()
 
 	_ = ob.Push(Event{ID: "1"})
 	_ = ob.Push(Event{ID: "2"})
 
 	err := ob.Push(Event{ID: "3"})
-	if err != ErrQueueFull {
+	if !errors.Is(ErrQueueFull, err) {
 		t.Errorf("Push() 3 = %v, want ErrQueueFull", err)
 	}
 
@@ -58,7 +59,7 @@ func TestOutboxDropNewest(t *testing.T) {
 }
 
 func TestOutboxDropOldest(t *testing.T) {
-	ob := NewOutbox(OutboxConfig{Capacity: 2, DropPolicy: DropOldest})
+	ob := NewOutbox(Config{Capacity: 2, DropPolicy: DropOldest})
 	defer ob.Close()
 
 	_ = ob.Push(Event{ID: "1"})
@@ -73,34 +74,32 @@ func TestOutboxDropOldest(t *testing.T) {
 }
 
 func TestOutboxContextCancellation(t *testing.T) {
-	ob := NewOutbox(OutboxConfig{Capacity: 10})
+	ob := NewOutbox(Config{Capacity: 10})
 	defer ob.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
 	_, err := ob.Pop(ctx)
-	if err != context.DeadlineExceeded {
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("Pop() on empty with timeout = %v, want DeadlineExceeded", err)
 	}
 }
 
-func TestOutboxConcurrent(t *testing.T) {
-	ob := NewOutbox(OutboxConfig{Capacity: 100, DropPolicy: DropOldest})
+func TestOutboxConcurrent(_ *testing.T) {
+	ob := NewOutbox(Config{Capacity: 100, DropPolicy: DropOldest})
 	defer ob.Close()
 
 	var wg sync.WaitGroup
 	const producers = 4
 	const itemsPerProducer = 250
 
-	for i := 0; i < producers; i++ {
-		wg.Add(1)
-		go func(pid int) {
-			defer wg.Done()
-			for j := 0; j < itemsPerProducer; j++ {
+	for range producers {
+		wg.Go(func() {
+			for range itemsPerProducer {
 				_ = ob.Push(Event{ID: "test", Timestamp: time.Now()})
 			}
-		}(i)
+		})
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -108,9 +107,7 @@ func TestOutboxConcurrent(t *testing.T) {
 
 	consumed := 0
 	var consWg sync.WaitGroup
-	consWg.Add(1)
-	go func() {
-		defer consWg.Done()
+	consWg.Go(func() {
 		for {
 			_, err := ob.Pop(ctx)
 			if err != nil {
@@ -118,7 +115,7 @@ func TestOutboxConcurrent(t *testing.T) {
 			}
 			consumed++
 		}
-	}()
+	})
 
 	wg.Wait()
 	time.Sleep(50 * time.Millisecond)

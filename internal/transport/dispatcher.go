@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"time"
@@ -27,7 +28,6 @@ type Dispatcher struct {
 	cfg    DispatcherConfig
 	client *http.Client
 	outbox *outbox.Outbox
-	rng    *rand.Rand
 
 	metricDispatched *metrics.Metric
 	metricFailures   *metrics.Metric
@@ -52,12 +52,10 @@ func NewDispatcher(cfg DispatcherConfig, ob *outbox.Outbox, reg *metrics.Registr
 		cfg.UserAgent = "EdgeTelemetryDaemon/1.0"
 	}
 
-	seq := uint64(time.Now().UnixNano())
 	d := &Dispatcher{
 		cfg:    cfg,
 		client: &http.Client{Timeout: cfg.Timeout},
 		outbox: ob,
-		rng:    rand.New(rand.NewPCG(seq, ^seq)),
 	}
 
 	if reg != nil {
@@ -105,13 +103,15 @@ func (d *Dispatcher) dispatchWithRetry(ctx context.Context, evt outbox.Event) er
 			}
 
 			// Apply ±25% randomized jitter via math/rand/v2
-			jitter := (d.rng.Float64()*0.5 - 0.25) * backoff
+			jitter := (rand.Float64()*0.5 - 0.25) * backoff
 			sleepDuration := time.Duration(backoff + jitter)
 
+			timer := time.NewTimer(sleepDuration)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return ctx.Err()
-			case <-time.After(sleepDuration):
+			case <-timer.C:
 			}
 		}
 
@@ -138,7 +138,10 @@ func (d *Dispatcher) postEvent(ctx context.Context, evt outbox.Event) error {
 	if err != nil {
 		return fmt.Errorf("HTTP post: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)

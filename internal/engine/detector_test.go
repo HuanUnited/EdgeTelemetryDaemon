@@ -11,7 +11,7 @@ import (
 func TestZScoreConstantStreamNeverFlags(t *testing.T) {
 	d := NewZScoreDetector(0.5, 30, 3.5)
 	flagged := 0
-	for i := 0; i < 500; i++ {
+	for range 500 {
 		if d.Update(42) {
 			flagged++
 		}
@@ -31,7 +31,7 @@ func TestZScoreSpikeDetectedAfterWarmup(t *testing.T) {
 	d := NewZScoreDetector(0.5, 30, 3.5)
 
 	// Warm up with a stable stream.
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if d.Update(10) {
 			t.Fatalf("warm-up value 10 flagged as anomaly")
 		}
@@ -50,7 +50,7 @@ func TestZScoreSpikeDetectedAfterWarmup(t *testing.T) {
 // (before minSamples Welford observations).
 func TestZScoreNoFlagBeforeWarmup(t *testing.T) {
 	d := NewZScoreDetector(0.5, 30, 0.001) // tiny threshold: would flag anything after warm-up
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		x := float64(i%3 + 1)
 		if d.Update(x) {
 			t.Fatalf("iteration %d flagged before warm-up completed", i)
@@ -65,7 +65,7 @@ func TestZScoreBoundedNoiseNoFalsePositives(t *testing.T) {
 	d := NewZScoreDetector(0.5, 50, 3.5)
 	rng := rand.New(rand.NewPCG(3, 9))
 	flagged := 0
-	for i := 0; i < 2000; i++ {
+	for range 2000 {
 		x := 100 + (rng.Float64()-0.5)*0.2 // uniform in [99.9, 100.1]
 		if d.Update(x) {
 			flagged++
@@ -109,7 +109,7 @@ func TestZScoreTracking(t *testing.T) {
 // TestZScoreReset confirms Reset returns the detector to a usable fresh state.
 func TestZScoreReset(t *testing.T) {
 	d := NewZScoreDetector(0.5, 30, 3.5)
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		d.Update(1)
 	}
 	d.Reset()
@@ -120,7 +120,7 @@ func TestZScoreReset(t *testing.T) {
 		t.Errorf("ZScore() after Reset = %v, want NaN", d.ZScore())
 	}
 	// A fresh stream must re-warm and detect a spike again.
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		d.Update(1)
 	}
 	if !d.Update(500) {
@@ -133,7 +133,7 @@ func TestZScoreReset(t *testing.T) {
 func TestZScoreRandomStreamNoPanic(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1234, 56))
 	d := NewZScoreDetector(0.5, 30, 3.5)
-	for i := 0; i < 2000; i++ {
+	for i := range 2000 {
 		x := rng.NormFloat64()*5 + 100
 		d.Update(x)
 		z := d.ZScore()
@@ -161,7 +161,7 @@ func FuzzZScoreNoPanic(f *testing.F) {
 		}
 		d := NewZScoreDetector(0.5, 30, 3.5)
 		flagged := 0
-		for i := 0; i < 200; i++ {
+		for range 200 {
 			if d.Update(base) {
 				flagged++
 			}

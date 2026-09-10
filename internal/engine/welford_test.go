@@ -51,7 +51,7 @@ func TestWelfordEquivalence(t *testing.T) {
 	const n = 10_000
 	xs := make([]float64, 0, n)
 	var sum float64
-	for i := 0; i < n; i++ {
+	for range n {
 		x := rng.NormFloat64()*3 + 10
 		xs = append(xs, x)
 		sum += x
@@ -151,7 +151,7 @@ func TestWelfordVarianceEdgeCases(t *testing.T) {
 // TestWelfordReset confirms Reset returns the instance to a usable zero state.
 func TestWelfordReset(t *testing.T) {
 	var w Welford
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		w.Update(float64(i))
 	}
 	w.Reset()

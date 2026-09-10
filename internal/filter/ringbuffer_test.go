@@ -32,15 +32,15 @@ func TestRingBufferPushAndSnapshot(t *testing.T) {
 	}
 }
 
-func TestRingBufferConcurrent(t *testing.T) {
+func TestRingBufferConcurrent(_ *testing.T) {
 	rb := NewRingBuffer(20)
 	var wg sync.WaitGroup
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < 200; j++ {
+			for j := range 200 {
 				rb.Push(SnapshotEntry{
 					Timestamp: time.Now(),
 					Value:     float64(id*1000 + j),

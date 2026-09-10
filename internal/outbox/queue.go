@@ -42,8 +42,8 @@ const (
 	DropOldest
 )
 
-// OutboxConfig configures bounded queue capacity and overflow behavior.
-type OutboxConfig struct {
+// Config configures bounded queue capacity and overflow behavior.
+type Config struct {
 	Capacity   int
 	DropPolicy DropPolicy
 }
@@ -66,7 +66,7 @@ type Outbox struct {
 }
 
 // NewOutbox builds an Outbox with the given configuration.
-func NewOutbox(cfg OutboxConfig) *Outbox {
+func NewOutbox(cfg Config) *Outbox {
 	if cfg.Capacity <= 0 {
 		cfg.Capacity = 100
 	}
@@ -104,13 +104,12 @@ func (o *Outbox) Push(evt Event) error {
 	o.count++
 	o.enqueued++
 
-	o.mu.Unlock()
-
 	// Signal waiting Pop goroutines without blocking
 	select {
 	case o.notify <- struct{}{}:
 	default:
 	}
+	o.mu.Unlock()
 
 	return nil
 }
@@ -125,6 +124,14 @@ func (o *Outbox) Pop(ctx context.Context) (Event, error) {
 			o.head = (o.head + 1) % o.capacity
 			o.count--
 			o.dequeued++
+			// if multiple consumers call pop or multiple events arrive, dequeuing leaves remaining events
+			// without a notif token, causing waiting consumers to deadlock
+			if o.count > 0 {
+				select {
+				case o.notify <- struct{}{}:
+				default:
+				}
+			}
 			o.mu.Unlock()
 			return evt, nil
 		}
@@ -156,7 +163,7 @@ func (o *Outbox) Capacity() int {
 }
 
 // Stats returns cumulative counts of enqueued, dequeued, and dropped events.
-func (o *Outbox) Stats() (enqueued, dequeued, dropped uint64) {
+func (o *Outbox) Stats() (uint64, uint64, uint64) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.enqueued, o.dequeued, o.dropped

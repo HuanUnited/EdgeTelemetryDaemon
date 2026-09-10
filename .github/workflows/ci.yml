@@ -23,7 +23,7 @@ jobs:
       - name: Run GolangCI-Lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.4
+          version: v2.13.2
 
       - name: Run Tests with Race Detector
         run: go test -v -race -count=1 ./...

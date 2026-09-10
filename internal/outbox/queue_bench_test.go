@@ -6,7 +6,7 @@ import (
 )
 
 func BenchmarkOutboxContention(b *testing.B) {
-	q := NewOutbox(OutboxConfig{Capacity: 10000, DropPolicy: DropOldest})
+	q := NewOutbox(Config{Capacity: 10000, DropPolicy: DropOldest})
 	ctx := context.Background()
 	payload := []byte("test")
 

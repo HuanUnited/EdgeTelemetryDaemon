@@ -34,22 +34,20 @@ func TestHeartbeatObserveAndFlush(t *testing.T) {
 	}
 }
 
-func TestHeartbeatConcurrent(t *testing.T) {
+func TestHeartbeatConcurrent(_ *testing.T) {
 	hb := NewHeartbeatAggregator(50 * time.Millisecond)
 	var wg sync.WaitGroup
 
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 500; j++ {
+	for range 8 {
+		wg.Go(func() {
+			for j := range 500 {
 				hb.Observe(float64(j), j%2 == 0, j%4 == 0)
 				if j%50 == 0 {
 					var s HeartbeatSummary
 					_ = hb.Flush(time.Now(), &s)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

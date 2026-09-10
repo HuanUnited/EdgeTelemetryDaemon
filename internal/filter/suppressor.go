@@ -77,7 +77,7 @@ func NewSuppressor(cfg SuppressorConfig) *Suppressor {
 
 // Process evaluates an anomaly signal observation against the deadband state machine.
 // Returns shouldAlert (true only when a fresh alert fires) and the current state.
-func (s *Suppressor) Process(isAnomalous bool, now time.Time) (shouldAlert bool, state SuppressorState) {
+func (s *Suppressor) Process(isAnomalous bool, now time.Time) (bool, SuppressorState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -97,7 +97,7 @@ func (s *Suppressor) Process(isAnomalous bool, now time.Time) (shouldAlert bool,
 			return false, s.state
 
 		case StateAlerting, StateSuppressed:
-			if s.cfg.HoldoffDuration > 0 && !s.lastAlertTime.IsZero() && now.Sub(s.lastAlertTime) >= s.cfg.HoldoffDuration {
+			if s.cfg.HoldoffDuration == 0 || (!s.lastAlertTime.IsZero() && now.Sub(s.lastAlertTime) >= s.cfg.HoldoffDuration) {
 				s.state = StateAlerting
 				s.lastAlertTime = now
 				s.totalAlertsFired++
@@ -127,8 +127,8 @@ func (s *Suppressor) State() SuppressorState {
 	return s.state
 }
 
-// Stats returns cumulative counts of total anomalies, alerts fired, and suppressed events.
-func (s *Suppressor) Stats() (totalAnomalies, totalAlertsFired, totalSuppressed uint64) {
+// Stats returns cumulative counts of total anomalies, total alerts fired, and total suppressed events.
+func (s *Suppressor) Stats() (uint64, uint64, uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.totalAnomalies, s.totalAlertsFired, s.totalSuppressed

@@ -1,11 +1,11 @@
 package transport
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,18 +14,19 @@ import (
 )
 
 func TestPhase4EndToEndIntegration(t *testing.T) {
-	var receivedCount int32
+	var receivedCount atomic.Int32
 	mockIngress := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "invalid method", http.StatusMethodNotAllowed)
 			return
 		}
+		receivedCount.Add(1)
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer mockIngress.Close()
 
 	reg := metrics.NewRegistry()
-	ob := outbox.NewOutbox(outbox.OutboxConfig{Capacity: 50, DropPolicy: outbox.DropOldest})
+	ob := outbox.NewOutbox(outbox.Config{Capacity: 50, DropPolicy: outbox.DropOldest})
 	defer ob.Close()
 
 	disp := NewDispatcher(DispatcherConfig{
@@ -35,8 +36,7 @@ func TestPhase4EndToEndIntegration(t *testing.T) {
 		MaxBackoff:     20 * time.Millisecond,
 	}, ob, reg)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go func() {
 		_ = disp.Run(ctx)
@@ -74,6 +74,7 @@ func TestPhase4EndToEndIntegration(t *testing.T) {
 	if !strings.Contains(body, "etd_alerts_dispatched_total 5") {
 		t.Errorf("Prometheus metrics missing expected dispatch count:\n%s", body)
 	}
-
-	_ = receivedCount
+	if count := receivedCount.Load(); count != 5 {
+		t.Errorf("Incorrect number of received events: got %d, want 5", count)
+	}
 }

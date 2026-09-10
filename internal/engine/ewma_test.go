@@ -23,7 +23,7 @@ func TestEWMASeedsFromFirstObservation(t *testing.T) {
 // average constant (alpha > 0).
 func TestEWMAConvergesToConstant(t *testing.T) {
 	e := NewEWMA(0.3)
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		e.Update(7)
 	}
 	if math.Abs(e.Value()-7) > 1e-12 {
@@ -50,11 +50,11 @@ func TestEWMAHandComputed(t *testing.T) {
 func TestEWMALeapTowardsRecentValue(t *testing.T) {
 	fast := NewEWMA(0.9)
 	slow := NewEWMA(0.1)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		fast.Update(1)
 		slow.Update(1)
 	}
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		fast.Update(100)
 		slow.Update(100)
 	}
@@ -125,7 +125,7 @@ func TestEWMAStabilityAgainstReference(t *testing.T) {
 	e := NewEWMA(0.3)
 	var ref float64
 	seen := false
-	for i := 0; i < 2000; i++ {
+	for i := range 2000 {
 		x := rng.NormFloat64()
 		e.Update(x)
 		if !seen {
@@ -158,7 +158,7 @@ func FuzzEWMAConverges(f *testing.F) {
 		// The first observation seeds the baseline; it must be excluded from
 		// the convergence check because it is adopted verbatim.
 		e.Update(x)
-		for i := 0; i < 1000; i++ {
+		for range 1000 {
 			e.Update(x)
 		}
 		if math.Abs(e.Value()-x) > 1e-9*math.Max(1, math.Abs(x)) {

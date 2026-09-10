@@ -8,19 +8,9 @@ package collector
 import (
 	"errors"
 	"fmt"
-	"os"
 	"syscall"
 	"unsafe"
 )
-
-// DefaultProcStatPath is the default location of the kernel CPU accounting
-// file. Overridable for tests.
-var DefaultProcStatPath = func() string {
-	if p := os.Getenv("ETD_PROCFS_PATH"); p != "" {
-		return p + "/stat"
-	}
-	return "/proc/stat"
-}()
 
 // CPUStats holds aggregate CPU tick counters parsed from /proc/stat's first
 // line ("cpu  ..."). All values are expressed in user-space "ticks" (typically
@@ -45,9 +35,9 @@ type CPUStats struct {
 // Modern Linux system call numbers for amd64 and arm64 architectures.
 // By defining these explicitly, we decouple our code from standard library shifts.
 const (
-	sysOPENAT uintptr = 257 // Linux SYS_OPENAT
-	sysCLOSE  uintptr = 3   // Linux SYS_CLOSE
-	sysREAD   uintptr = 0   // Linux SYS_READ
+	sysOPENAT uintptr = syscall.SYS_OPENAT // Linux SYS_OPENAT
+	sysCLOSE  uintptr = syscall.SYS_CLOSE  // Linux SYS_CLOSE
+	sysREAD   uintptr = syscall.SYS_READ   // Linux SYS_READ
 
 	// AT_FDCWD (-100) tells openat to look relative to the current working directory.
 	atFDCWD = ^uintptr(99)
@@ -69,12 +59,8 @@ func CollectCPU(procPath string, out *CPUStats) error {
 // scrapeProcStat reads the first line of the file at path (expected to be
 // /proc/stat) and parses the aggregate "cpu" row into out. The caller supplies
 // the output value by pointer so that the method allocates nothing on the hot
-// path.
-//
-// out.Total is computed after parsing; any counters reported by the kernel
+// path. out.Total is computed after parsing; any counters reported by the kernel
 // beyond GuestN are ignored, matching the fields enumerated by CPUStats.
-var procStatPath = []byte("/proc/stat\x00")
-
 func scrapeProcStat(path string, out *CPUStats) error {
 	if len(path) >= 256 {
 		return errPathTooLong
@@ -87,7 +73,9 @@ func scrapeProcStat(path string, out *CPUStats) error {
 	if errno != 0 {
 		return errOpenStat
 	}
-	defer syscall.Syscall(sysCLOSE, fd, 0, 0)
+	defer func() {
+		_, _, _ = syscall.Syscall(sysCLOSE, fd, 0, 0)
+	}()
 
 	var buf [512]byte
 	n, _, rerr := syscall.Syscall(sysREAD, fd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
@@ -147,8 +135,9 @@ var errInvalidUint = errors.New("collector: expected unsigned integer")
 // nextUint parses an unsigned decimal integer at the start of b, returning the
 // remainder of b after the number and its trailing whitespace, along with the
 // parsed value. It returns an error when the field is absent or malformed.
-func nextUint(b []byte) (rest []byte, val uint64, err error) {
+func nextUint(b []byte) ([]byte, uint64, error) {
 	i := 0
+	var val uint64
 	for i < len(b) && b[i] >= '0' && b[i] <= '9' {
 		val = val*10 + uint64(b[i]-'0')
 		i++

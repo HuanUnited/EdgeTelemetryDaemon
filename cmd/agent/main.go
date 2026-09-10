@@ -82,7 +82,14 @@ func (a *Agent) tick(now time.Time) {
 		if a.hasPrevCPU && a.cpuStats.Total > a.prevCPU.Total {
 			deltaTotal := float64(a.cpuStats.Total - a.prevCPU.Total)
 			deltaWork := float64((a.cpuStats.User + a.cpuStats.Nice + a.cpuStats.System) - (a.prevCPU.User + a.prevCPU.Nice + a.prevCPU.System))
-			a.metricCPU.SetFloat64((deltaWork / deltaTotal) * 100.0)
+			switch a.cfg.CPUReportMode {
+			case "ticks":
+				a.metricCPU.SetFloat64(deltaWork)
+			case "hertz":
+				a.metricCPU.SetFloat64(deltaTotal / a.cfg.ScrapeInterval.Seconds())
+			default:
+				a.metricCPU.SetFloat64((deltaWork / deltaTotal) * 100.0)
+			}
 		}
 		a.prevCPU = a.cpuStats
 		a.hasPrevCPU = true
@@ -139,10 +146,7 @@ func (a *Agent) tick(now time.Time) {
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		_, err2 := fmt.Fprintf(os.Stderr, "failed to load configuration: %v\n", err)
-		if err2 != nil {
-			return
-		}
+		_, _ = fmt.Fprintf(os.Stderr, "failed to load configuration: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -154,7 +158,7 @@ func main() {
 
 	reg := metrics.NewRegistry()
 	metricHTTPRequests := reg.NewCounter("etd_http_requests_total", "Total HTTP requests served")
-	ob := outbox.NewOutbox(outbox.OutboxConfig{Capacity: 500, DropPolicy: outbox.DropOldest})
+	ob := outbox.NewOutbox(outbox.Config{Capacity: 500, DropPolicy: outbox.DropOldest})
 	defer ob.Close()
 
 	agent := newAgent(cfg, ob, reg)
@@ -164,7 +168,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", reg.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		if ob.Len() >= ob.Capacity() {
 			http.Error(w, "queue saturated", http.StatusServiceUnavailable)
 			return
@@ -172,11 +176,11 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
-	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
-	mux.HandleFunc("/inject/anomaly", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/inject/anomaly", func(w http.ResponseWriter, _ *http.Request) {
 		agent.injectSpikes.Store(3)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("anomaly burst scheduled (3 cycles)"))
@@ -201,13 +205,11 @@ func main() {
 	}()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if err := disp.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("dispatcher exited with error", "error", err)
 		}
-	}()
+	})
 
 	ticker := time.NewTicker(cfg.ScrapeInterval)
 	defer ticker.Stop()

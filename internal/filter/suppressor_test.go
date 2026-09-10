@@ -49,7 +49,7 @@ func TestSuppressorStateTransitions(t *testing.T) {
 	}
 }
 
-func TestSuppressorConcurrent(t *testing.T) {
+func TestSuppressorConcurrent(_ *testing.T) {
 	s := NewSuppressor(SuppressorConfig{
 		HoldoffDuration:         50 * time.Millisecond,
 		MinConsecutiveAnomalies: 1,
@@ -60,17 +60,15 @@ func TestSuppressorConcurrent(t *testing.T) {
 	const goroutines = 8
 	const iterations = 500
 
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
+	for range goroutines {
+		wg.Go(func() {
 			now := time.Now()
-			for j := 0; j < iterations; j++ {
-				isAnom := (j%3 == 0)
+			for j := range iterations {
+				isAnom := j%3 == 0
 				s.Process(isAnom, now.Add(time.Duration(j)*time.Millisecond))
 				_ = s.State()
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 }
@@ -81,7 +79,7 @@ func FuzzSuppressorProcess(f *testing.F) {
 	f.Add(true, int64(-1000))
 	f.Add(false, int64(1700000050))
 
-	f.Fuzz(func(t *testing.T, isAnomaly bool, unixSec int64) {
+	f.Fuzz(func(_ *testing.T, isAnomaly bool, unixSec int64) {
 		s := NewSuppressor(SuppressorConfig{
 			HoldoffDuration:         5 * time.Second,
 			MinConsecutiveAnomalies: 2,

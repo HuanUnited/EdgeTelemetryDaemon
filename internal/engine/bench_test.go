@@ -8,7 +8,7 @@ import (
 // warmStream pre-populates the detector with stable values so benchmarks
 // exercise the post-warm-up Z-score path rather than the warm-up heuristic.
 func warmStream(d *ZScoreDetector) {
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		d.Update(10)
 	}
 }
@@ -48,11 +48,10 @@ func BenchmarkZScore(b *testing.B) {
 
 	// Alternate between normal and anomalous values so the Z-score path is
 	// exercised without the compiler being able to prove constancy.
-	x := 10.0
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		x = 10 + float64(i&1)
+		x := 10 + float64(i&1)
 		d.Update(x)
 	}
 	if d.Count() == 0 {

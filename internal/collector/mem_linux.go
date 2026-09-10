@@ -6,30 +6,20 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"os"
 	"syscall"
 	"unsafe"
 )
 
-// DefaultProcMemInfoPath is the default location of the kernel memory
-// accounting file. Overridable for tests.
-var DefaultProcMemInfoPath = func() string {
-	if p := os.Getenv("ETD_PROCFS_PATH"); p != "" {
-		return p + "/meminfo"
-	}
-	return "/proc/meminfo"
-}()
-
 // Package-level key constants allow allocation-free field dispatch against
 // lines parsed from /proc/meminfo. They are treated as read-only.
-var (
-	memKeyTotal     = []byte("MemTotal")
-	memKeyFree      = []byte("MemFree")
-	memKeyAvailable = []byte("MemAvailable")
-	memKeyBuffers   = []byte("Buffers")
-	memKeyCached    = []byte("Cached")
-	memKeySwapTotal = []byte("SwapTotal")
-	memKeySwapFree  = []byte("SwapFree")
+const (
+	memKeyTotal     = "MemTotal"
+	memKeyFree      = "MemFree"
+	memKeyAvailable = "MemAvailable"
+	memKeyBuffers   = "Buffers"
+	memKeyCached    = "Cached"
+	memKeySwapTotal = "SwapTotal"
+	memKeySwapFree  = "SwapFree"
 )
 
 // static error messages for zero alloc reporting
@@ -78,7 +68,9 @@ func scrapeProcMemInfo(path string, out *MemStats) error {
 	if errno != 0 {
 		return errOpenMemInfo
 	}
-	defer syscall.Syscall(sysCLOSE, fd, 0, 0)
+	defer func() {
+		_, _, _ = syscall.Syscall(sysCLOSE, fd, 0, 0)
+	}()
 
 	var buf [memBufSize]byte
 	n, _, rerr := syscall.Syscall(sysREAD, fd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
@@ -116,19 +108,19 @@ func parseMemInfo(data []byte, out *MemStats) error {
 		}
 
 		switch {
-		case bytes.Equal(key, memKeyTotal):
+		case bytes.Equal(key, []byte(memKeyTotal)):
 			out.MemTotal = value
-		case bytes.Equal(key, memKeyFree):
+		case bytes.Equal(key, []byte(memKeyFree)):
 			out.MemFree = value
-		case bytes.Equal(key, memKeyAvailable):
+		case bytes.Equal(key, []byte(memKeyAvailable)):
 			out.MemAvailable = value
-		case bytes.Equal(key, memKeyBuffers):
+		case bytes.Equal(key, []byte(memKeyBuffers)):
 			out.Buffers = value
-		case bytes.Equal(key, memKeyCached):
+		case bytes.Equal(key, []byte(memKeyCached)):
 			out.Cached = value
-		case bytes.Equal(key, memKeySwapTotal):
+		case bytes.Equal(key, []byte(memKeySwapTotal)):
 			out.SwapTotal = value
-		case bytes.Equal(key, memKeySwapFree):
+		case bytes.Equal(key, []byte(memKeySwapFree)):
 			out.SwapFree = value
 		default:
 			continue
@@ -144,18 +136,15 @@ func parseMemInfo(data []byte, out *MemStats) error {
 
 // splitKey splits a /proc/meminfo line into its "Key:" prefix and the value
 // remainder. It returns ok=false when no colon is found.
-func splitKey(line []byte) (key, rest []byte, ok bool) {
-	idx := bytes.IndexByte(line, ':')
-	if idx < 0 {
-		return nil, nil, false
-	}
-	return line[:idx], line[idx+1:], true
+func splitKey(line []byte) ([]byte, []byte, bool) {
+	return bytes.Cut(line, []byte(":"))
 }
 
 // parseValue extracts the leading unsigned integer from rest. It returns
 // ok=false when no digit is present.
-func parseValue(rest []byte) (value uint64, ok bool) {
+func parseValue(rest []byte) (uint64, bool) {
 	rest = bytes.TrimLeft(rest, " \t")
+	var value uint64
 	i := 0
 	for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
 		value = value*10 + uint64(rest[i]-'0')
