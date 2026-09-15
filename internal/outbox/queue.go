@@ -22,6 +22,8 @@ const (
 	EventAnomalyAlert EventType = "anomaly_alert"
 	// EventHeartbeat identifies periodic heartbeat metrics summaries.
 	EventHeartbeat EventType = "heartbeat"
+	// EventDriftAlert identifies telemetry drift divergence alert events.
+	EventDriftAlert EventType = "drift_alert"
 )
 
 // Event represents a telemetry payload queued for outbound transmission.

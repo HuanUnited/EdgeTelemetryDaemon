@@ -61,7 +61,7 @@ func newAgent(cfg config.Config, ob *outbox.Outbox, reg *metrics.Registry) *Agen
 		cfg:              cfg,
 		ob:               ob,
 		reg:              reg,
-		det:              engine.NewZScoreDetector(0.1, cfg.DetectorMinSamples, 3.0),
+		det:              engine.NewZScoreDetector(0.1, 0.01, cfg.DetectorMinSamples, 3.0, 0.15),
 		supp:             filter.NewSuppressor(filter.SuppressorConfig{HoldoffDuration: 10 * time.Second, MinConsecutiveAnomalies: 2, MinConsecutiveNormals: 3}),
 		ringBuf:          filter.NewRingBuffer(20),
 		hb:               filter.NewHeartbeatAggregator(30 * time.Second),

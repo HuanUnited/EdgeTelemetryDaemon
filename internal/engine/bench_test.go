@@ -43,7 +43,7 @@ func BenchmarkEWMAUpdate(b *testing.B) {
 }
 
 func BenchmarkZScore(b *testing.B) {
-	d := NewZScoreDetector(0.5, 30, 3.5)
+	d := NewZScoreDetector(0.5, 0.05, 30, 3.5, 0.15)
 	warmStream(d)
 
 	// Alternate between normal and anomalous values so the Z-score path is
@@ -61,7 +61,7 @@ func BenchmarkZScore(b *testing.B) {
 
 func BenchmarkZScoreDetect(b *testing.B) {
 	rng := rand.New(rand.NewPCG(7, 11))
-	d := NewZScoreDetector(0.5, 30, 3.5)
+	d := NewZScoreDetector(0.5, 0.05, 30, 3.5, 0.15)
 	warmStream(d)
 
 	b.ReportAllocs()
@@ -72,5 +72,24 @@ func BenchmarkZScoreDetect(b *testing.B) {
 			// Consume the flag; keep the branch so the result is observable.
 			_ = d.ZScore()
 		}
+	}
+}
+
+// BenchmarkZScoreExtendedUpdate benchmarks the extended dual-horizon Update() execution path.
+//
+// Expected go test -bench=. -benchmem output:
+// BenchmarkZScoreExtendedUpdate-...  ... ns/op  0 B/op  0 allocs/op
+func BenchmarkZScoreExtendedUpdate(b *testing.B) {
+	d := NewZScoreDetector(0.1, 0.01, 30, 3.5, 0.15)
+	warmStream(d)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		x := 10.0 + float64(i&1)*0.1
+		_ = d.Update(x)
+	}
+	if d.Count() == 0 {
+		b.Fatal("detector not updated")
 	}
 }
