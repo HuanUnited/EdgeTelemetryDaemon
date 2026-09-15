@@ -3,7 +3,7 @@ BINARY_NAME=edge-telemetry-daemon
 GO=go
 DOCKER=docker
 
-.PHONY: all build test bench lint docker-build clean
+.PHONY: all build test bench lint docker-build fuzz clean
 
 # Complete default target pipeline
 all: test build
@@ -27,6 +27,10 @@ lint:
 # Building minimal container image
 docker-build:
 	$(DOCKER) build -t $(BINARY_NAME):latest .
+
+# Fuzz testing
+fuzz:
+	@chmod +x ./fuzz_all.sh && ./fuzz_all.sh
 
 # Cleaning build artifacts
 clean:
