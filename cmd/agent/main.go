@@ -115,6 +115,7 @@ func computeInterval(z, tauMin, tauMax, theta float64) time.Duration {
 	return time.Duration(math.Round(ms)) * time.Millisecond
 }
 
+//nolint:funlen // This function coordinates a high-density, multi-step monitoring loop that should not be split up
 func (a *Agent) tick(now time.Time) time.Duration {
 	a.metricScrapes.Inc()
 

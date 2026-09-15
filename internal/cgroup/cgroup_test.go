@@ -27,12 +27,12 @@ func TestCgroupQuotaTransitions(t *testing.T) {
 		t.Fatalf("Mode() = %v, want %v", got, ModeBurst)
 	}
 
-	if err := ctrl.SetBurst(); err != nil {
-		t.Fatalf("second SetBurst() failed: %v", err)
+	if errSetBurst := ctrl.SetBurst(); errSetBurst != nil {
+		t.Fatalf("second SetBurst() failed: %v", errSetBurst)
 	}
 
-	if err := ctrl.SetQuiescent(); err != nil {
-		t.Fatalf("SetQuiescent() failed: %v", err)
+	if errSetQuiescent := ctrl.SetQuiescent(); errSetQuiescent != nil {
+		t.Fatalf("SetQuiescent() failed: %v", errSetQuiescent)
 	}
 
 	data, err = os.ReadFile(cpuMaxPath)
@@ -53,8 +53,8 @@ func TestCgroupQuotaTransitions(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond)
 
-	if err := ctrl.SetQuiescent(); err != nil {
-		t.Fatalf("second SetQuiescent() failed: %v", err)
+	if errSetQuiesenct := ctrl.SetQuiescent(); errSetQuiesenct != nil {
+		t.Fatalf("second SetQuiescent() failed: %v", errSetQuiesenct)
 	}
 
 	infoAfter, err := os.Stat(cpuMaxPath)

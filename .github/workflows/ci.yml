@@ -64,6 +64,9 @@ jobs:
           docker compose up -d --build
           sleep 5
           docker compose ps
-          curl -f http://localhost:8080/healthz
-          curl -f http://localhost:8080/metrics
+        
+          AGENT_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' edge-telemetry-daemon)
+          curl -f "http://${AGENT_IP}:8080/healthz"
+          curl -f "http://${AGENT_IP}:8080/metrics"
+        
           docker compose down

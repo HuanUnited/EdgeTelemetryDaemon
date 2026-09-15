@@ -100,8 +100,8 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 		now = now.Add(time.Second)
 		agent.tick(now)
 		for ob.Len() > 0 {
-			evt, err := ob.Pop(ctx)
-			if err != nil {
+			evt, errPop := ob.Pop(ctx)
+			if errPop != nil {
 				break
 			}
 			if evt.Type == outbox.EventAnomalyAlert {
@@ -129,8 +129,8 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 	}
 
 	var payload AnomalyPayload
-	if err := json.Unmarshal(alertEvt.Data, &payload); err != nil {
-		t.Fatalf("failed to unmarshal alert payload: %v", err)
+	if errUnmarshal := json.Unmarshal(alertEvt.Data, &payload); errUnmarshal != nil {
+		t.Fatalf("failed to unmarshal alert payload: %v", errUnmarshal)
 	}
 	if len(payload.PreContext) == 0 {
 		t.Fatalf("alert payload PreContext is empty, want non-empty")
