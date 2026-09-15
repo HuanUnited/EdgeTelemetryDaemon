@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/HuanUnited/edgetelemetrydaemon/internal/cgroup"
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/collector"
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/config"
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/engine"
@@ -21,6 +23,12 @@ import (
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/metrics"
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/outbox"
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/transport"
+)
+
+const (
+	defaultHoldoffDuration         = 10 * time.Second
+	defaultMinConsecutiveAnomalies = 2
+	defaultMinConsecutiveNormals   = 3
 )
 
 type AnomalyPayload struct {
@@ -32,16 +40,25 @@ type AnomalyPayload struct {
 	PreContext    []filter.SnapshotEntry `json:"pre_context"`
 }
 
+type DriftPayload struct {
+	Timestamp  time.Time `json:"timestamp"`
+	DriftIndex float64   `json:"drift_index"`
+}
+
 type Agent struct {
-	cfg          config.Config
-	ob           *outbox.Outbox
-	reg          *metrics.Registry
-	det          *engine.ZScoreDetector
-	supp         *filter.Suppressor
-	ringBuf      *filter.RingBuffer
-	hb           *filter.HeartbeatAggregator
-	aiGen        *collector.AIGen
-	injectSpikes atomic.Int32
+	cfg                 config.Config
+	suppCfg             filter.SuppressorConfig
+	ob                  *outbox.Outbox
+	reg                 *metrics.Registry
+	det                 *engine.ZScoreDetector
+	supp                *filter.Suppressor
+	ringBuf             *filter.RingBuffer
+	hb                  *filter.HeartbeatAggregator
+	aiGen               *collector.AIGen
+	cgroupCtl           *cgroup.Controller
+	prevSuppressorState filter.SuppressorState
+	prevDrifting        bool
+	injectSpikes        atomic.Int32
 
 	metricScrapes    *metrics.Metric
 	metricAnomalies  *metrics.Metric
@@ -57,25 +74,48 @@ type Agent struct {
 }
 
 func newAgent(cfg config.Config, ob *outbox.Outbox, reg *metrics.Registry) *Agent {
+	suppCfg := filter.SuppressorConfig{
+		HoldoffDuration:         defaultHoldoffDuration,
+		MinConsecutiveAnomalies: defaultMinConsecutiveAnomalies,
+		MinConsecutiveNormals:   defaultMinConsecutiveNormals,
+	}
 	return &Agent{
-		cfg:              cfg,
-		ob:               ob,
-		reg:              reg,
-		det:              engine.NewZScoreDetector(0.1, 0.01, cfg.DetectorMinSamples, 3.0, 0.15),
-		supp:             filter.NewSuppressor(filter.SuppressorConfig{HoldoffDuration: 10 * time.Second, MinConsecutiveAnomalies: 2, MinConsecutiveNormals: 3}),
-		ringBuf:          filter.NewRingBuffer(20),
-		hb:               filter.NewHeartbeatAggregator(30 * time.Second),
-		aiGen:            collector.NewAIGen(collector.DefaultAIGenConfig()),
-		metricScrapes:    reg.NewCounter("etd_scrapes_total", "Total telemetry scrape cycles performed"),
-		metricAnomalies:  reg.NewCounter("etd_anomalies_detected_total", "Total raw anomalies detected by engine"),
-		metricAlerts:     reg.NewCounter("etd_alerts_triggered_total", "Total alerts tripped past deadband suppressor"),
-		metricThroughput: reg.NewGauge("etd_inferences_per_sec", "Current AI inference throughput metric"),
-		metricCPU:        reg.NewGauge("etd_cpu_utilization_percent", "Host CPU utilization percentage"),
-		metricMem:        reg.NewGauge("etd_mem_used_bytes", "Host used memory in bytes"),
+		cfg:                 cfg,
+		suppCfg:             suppCfg,
+		ob:                  ob,
+		reg:                 reg,
+		det:                 engine.NewZScoreDetector(0.1, 0.01, cfg.DetectorMinSamples, 3.0, 0.15),
+		supp:                filter.NewSuppressor(suppCfg),
+		ringBuf:             filter.NewRingBuffer(20),
+		hb:                  filter.NewHeartbeatAggregator(30 * time.Second),
+		aiGen:               collector.NewAIGen(collector.DefaultAIGenConfig()),
+		cgroupCtl:           cgroup.NewController(cfg.CgroupRoot),
+		prevSuppressorState: filter.StateNormal,
+		metricScrapes:       reg.NewCounter("etd_scrapes_total", "Total telemetry scrape cycles performed"),
+		metricAnomalies:     reg.NewCounter("etd_anomalies_detected_total", "Total raw anomalies detected by engine"),
+		metricAlerts:        reg.NewCounter("etd_alerts_triggered_total", "Total alerts tripped past deadband suppressor"),
+		metricThroughput:    reg.NewGauge("etd_inferences_per_sec", "Current AI inference throughput metric"),
+		metricCPU:           reg.NewGauge("etd_cpu_utilization_percent", "Host CPU utilization percentage"),
+		metricMem:           reg.NewGauge("etd_mem_used_bytes", "Host used memory in bytes"),
 	}
 }
 
-func (a *Agent) tick(now time.Time) {
+func computeInterval(z, tauMin, tauMax, theta float64) time.Duration {
+	if math.IsNaN(z) {
+		z = 0
+	}
+	ratio := math.Abs(z) / theta
+	if ratio > 1.0 {
+		ratio = 1.0
+	}
+	ms := tauMax - (tauMax-tauMin)*ratio
+	if ms < tauMin {
+		ms = tauMin
+	}
+	return time.Duration(math.Round(ms)) * time.Millisecond
+}
+
+func (a *Agent) tick(now time.Time) time.Duration {
 	a.metricScrapes.Inc()
 
 	if err := collector.CollectCPU(a.cfg.ProcfsPath, &a.cpuStats); err == nil {
@@ -112,9 +152,25 @@ func (a *Agent) tick(now time.Time) {
 		a.metricAnomalies.Inc()
 	}
 
-	shouldAlert, state := a.supp.Process(rawAnom, now)
-	a.ringBuf.Push(filter.SnapshotEntry{Timestamp: now, Value: sample.InferencesPerSec, ZScore: zScore, Anomalous: rawAnom})
-	a.hb.Observe(sample.InferencesPerSec, rawAnom, state == filter.StateSuppressed)
+	isAnom := rawAnom
+	if engine.IsSaturated(a.memStats.MemTotal, a.memStats.MemAvailable, 5.0) {
+		isAnom = true
+	}
+
+	shouldAlert, state := a.supp.Process(isAnom, now)
+	if state != a.prevSuppressorState && state == filter.StateAlerting {
+		if err := a.cgroupCtl.SetBurst(); err != nil {
+			slog.Error("failed to set cgroup burst quota", "error", err)
+		}
+	} else if state != a.prevSuppressorState && state == filter.StateNormal {
+		if err := a.cgroupCtl.SetQuiescent(); err != nil {
+			slog.Error("failed to set cgroup quiescent quota", "error", err)
+		}
+	}
+	a.prevSuppressorState = state
+
+	a.ringBuf.Push(filter.SnapshotEntry{Timestamp: now, Value: sample.InferencesPerSec, ZScore: zScore, Anomalous: isAnom})
+	a.hb.Observe(sample.InferencesPerSec, isAnom, state == filter.StateSuppressed)
 
 	if shouldAlert {
 		a.metricAlerts.Inc()
@@ -133,6 +189,24 @@ func (a *Agent) tick(now time.Time) {
 		}
 	}
 
+	isDrifting := a.det.IsDrifting()
+	if isDrifting && !a.prevDrifting {
+		payload, err := json.Marshal(DriftPayload{
+			Timestamp:  now,
+			DriftIndex: a.det.DriftIndex(),
+		})
+		if err == nil {
+			_ = a.ob.Push(outbox.Event{
+				ID:        fmt.Sprintf("drift-%d", now.UnixNano()),
+				Type:      outbox.EventDriftAlert,
+				Timestamp: now,
+				Data:      payload,
+			})
+			slog.Warn("drift alert triggered", "drift_index", a.det.DriftIndex())
+		}
+	}
+	a.prevDrifting = isDrifting
+
 	if a.hb.ShouldFlush(now) {
 		var summary filter.HeartbeatSummary
 		a.hb.Flush(now, &summary)
@@ -141,6 +215,33 @@ func (a *Agent) tick(now time.Time) {
 			slog.Debug("heartbeat flushed", "samples", summary.TotalSamples)
 		}
 	}
+
+	tauMinMs := float64(a.cfg.RateTauMin) / float64(time.Millisecond)
+	tauMaxMs := float64(a.cfg.RateTauMax) / float64(time.Millisecond)
+	return computeInterval(zScore, tauMinMs, tauMaxMs, a.cfg.RateTheta)
+}
+
+func newMux(agent *Agent, reg *metrics.Registry, ob *outbox.Outbox) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", reg.Handler())
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		if ob.Len() >= ob.Capacity() {
+			http.Error(w, "queue saturated", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	})
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	})
+	mux.HandleFunc("/inject/anomaly", func(w http.ResponseWriter, _ *http.Request) {
+		agent.injectSpikes.Store(3)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("anomaly burst scheduled (3 cycles)"))
+	})
+	return mux
 }
 
 func main() {
@@ -166,25 +267,7 @@ func main() {
 		TargetURL: cfg.TargetURL, MaxRetries: 3, InitialBackoff: 100 * time.Millisecond, MaxBackoff: 3 * time.Second,
 	}, ob, reg)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/metrics", reg.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		if ob.Len() >= ob.Capacity() {
-			http.Error(w, "queue saturated", http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("OK"))
-	})
-	mux.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("OK"))
-	})
-	mux.HandleFunc("/inject/anomaly", func(w http.ResponseWriter, _ *http.Request) {
-		agent.injectSpikes.Store(3)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("anomaly burst scheduled (3 cycles)"))
-	})
+	mux := newMux(agent, reg, ob)
 
 	httpServer := &http.Server{
 		Addr: cfg.ListenAddr,
@@ -223,7 +306,8 @@ func main() {
 			wg.Wait()
 			return
 		case now := <-ticker.C:
-			agent.tick(now)
+			next := agent.tick(now)
+			ticker.Reset(next)
 		}
 	}
 }

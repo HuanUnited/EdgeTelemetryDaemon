@@ -17,6 +17,10 @@ const (
 	DefaultScrapeInterval = 5 * time.Second
 	DefaultCPUReportMode  = "percent"
 	DefaultLogLevel       = "info"
+	DefaultRateTauMin     = 50 * time.Millisecond
+	DefaultRateTauMax     = 5 * time.Second
+	DefaultRateTheta      = 3.5
+	DefaultCgroupRoot     = "/sys/fs/cgroup"
 )
 
 // Config holds the runtime configuration for the daemon. All fields are
@@ -44,6 +48,18 @@ type Config struct {
 
 	// ProcfsPath ensures runtime procfs overrides are validated and accessible
 	ProcfsPath string
+
+	// RateTauMin is the lower bound sampling interval under peak anomaly.
+	RateTauMin time.Duration
+
+	// RateTauMax is the upper bound sampling interval under quiescent conditions.
+	RateTauMax time.Duration
+
+	// RateTheta is the sensitivity scaling parameter for adaptive sampling.
+	RateTheta float64
+
+	// CgroupRoot is the root filesystem path to the cgroup hierarchy.
+	CgroupRoot string
 }
 
 // Load reads configuration from environment variables, applies defaults for
@@ -55,6 +71,10 @@ type Config struct {
 //	ETD_SCRAPE_INTERVAL  duration string, e.g. "5s" (default "5s")
 //	ETD_CPU_REPORT_MODE  "percent" | "ticks" | "hertz" (default "percent")
 //	ETD_LOG_LEVEL        "debug" | "info" | "warn" | "error" (default "info")
+//	ETD_RATE_TAU_MIN     duration string, e.g. "50ms" (default "50ms")
+//	ETD_RATE_TAU_MAX     duration string, e.g. "5s" (default "5s")
+//	ETD_RATE_THETA       float string, e.g. "3.5" (default "3.5")
+//	ETD_CGROUP_ROOT      filesystem path to cgroup v2 (default "/sys/fs/cgroup")
 func Load() (Config, error) {
 	cfg := Config{
 		ListenAddr:         strings.TrimSpace(getenv("ETD_LISTEN_ADDR", DefaultListenAddr)),
@@ -64,6 +84,10 @@ func Load() (Config, error) {
 		TargetURL:          getenv("ETD_TARGET_URL", "http://localhost:8080/ingest/dummy"),
 		DetectorMinSamples: uint64(getenvInt("ETD_DETECTOR_MIN_SAMPLES", 30)),
 		ProcfsPath:         getenv("ETD_PROCFS_PATH", "/proc"),
+		RateTauMin:         getenvDuration("ETD_RATE_TAU_MIN", DefaultRateTauMin),
+		RateTauMax:         getenvDuration("ETD_RATE_TAU_MAX", DefaultRateTauMax),
+		RateTheta:          getenvFloat("ETD_RATE_THETA", DefaultRateTheta),
+		CgroupRoot:         getenv("ETD_CGROUP_ROOT", DefaultCgroupRoot),
 	}
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
@@ -89,6 +113,12 @@ func (c Config) validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("config: unsupported log level %q (want debug, info, warn, or error)", c.LogLevel)
+	}
+	if c.RateTauMin >= c.RateTauMax {
+		return fmt.Errorf("config: rate tau min must be less than rate tau max, got min=%s max=%s", c.RateTauMin, c.RateTauMax)
+	}
+	if c.RateTheta <= 0 {
+		return fmt.Errorf("config: rate theta must be positive, got %f", c.RateTheta)
 	}
 	return nil
 }
@@ -117,6 +147,15 @@ func getenvInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if i, err := strconv.Atoi(v); err == nil && i > 0 {
 			return i
+		}
+	}
+	return def
+}
+
+func getenvFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return def
