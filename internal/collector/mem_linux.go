@@ -33,19 +33,6 @@ var (
 // comfortably under 4 KiB on all supported kernels.
 const memBufSize = 4096
 
-// MemStats holds the subset of /proc/meminfo values relevant to telemetry.
-// All values are reported in kilobytes, matching the kernel's accounting
-// units for this file.
-type MemStats struct {
-	MemTotal     uint64
-	MemFree      uint64
-	MemAvailable uint64
-	Buffers      uint64
-	Cached       uint64
-	SwapTotal    uint64
-	SwapFree     uint64
-}
-
 // CollectMem populates out with host memory statistics read from
 // DefaultProcMemInfoPath. No heap allocations occur on the success path.
 func CollectMem(procPath string, out *MemStats) error {

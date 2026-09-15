@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -121,4 +122,79 @@ func TestOutboxConcurrent(_ *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 	consWg.Wait()
+}
+
+func TestOutboxNotificationMultiConsumerStarvation(t *testing.T) {
+	ob := NewOutbox(Config{Capacity: 10, DropPolicy: DropOldest})
+	defer ob.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var err1, err2 error
+	var evt1, evt2 Event
+
+	wg.Go(func() {
+		evt1, err1 = ob.Pop(ctx)
+	})
+
+	wg.Go(func() {
+		evt2, err2 = ob.Pop(ctx)
+	})
+
+	time.Sleep(20 * time.Millisecond)
+
+	pushDone := make(chan struct{})
+	go func() {
+		defer close(pushDone)
+		if err := ob.Push(Event{ID: "event-1"}); err != nil {
+			t.Errorf("Push event-1 failed: %v", err)
+		}
+		if err := ob.Push(Event{ID: "event-2"}); err != nil {
+			t.Errorf("Push event-2 failed: %v", err)
+		}
+	}()
+
+	<-pushDone
+	wg.Wait()
+
+	if err1 != nil {
+		t.Errorf("consumer 1 Pop error: %v", err1)
+	}
+	if err2 != nil {
+		t.Errorf("consumer 2 Pop error: %v", err2)
+	}
+	if evt1.ID == "" || evt2.ID == "" {
+		t.Errorf("expected non-empty events, got evt1=%+v evt2=%+v", evt1, evt2)
+	}
+}
+
+func TestOutboxNotificationRaceUnderClose(t *testing.T) {
+	ob := NewOutbox(Config{Capacity: 50, DropPolicy: DropOldest})
+
+	const producers = 10
+	var wg sync.WaitGroup
+	var closedErrors atomic.Int32
+
+	for range producers {
+		wg.Go(func() {
+			for {
+				err := ob.Push(Event{ID: "race-event"})
+				if errors.Is(err, ErrQueueClosed) {
+					closedErrors.Add(1)
+					return
+				}
+			}
+		})
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	ob.Close()
+
+	wg.Wait()
+
+	if int(closedErrors.Load()) != producers {
+		t.Fatalf("producers receiving ErrQueueClosed = %d, want %d", closedErrors.Load(), producers)
+	}
 }

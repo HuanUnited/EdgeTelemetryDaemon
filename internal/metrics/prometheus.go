@@ -52,9 +52,9 @@ func (m *Metric) Add(v uint64) {
 func (m *Metric) Set(v uint64) {
 	if m.Type == TypeGauge {
 		m.valBits.Store(math.Float64bits(float64(v)))
-	} else {
-		m.valBits.Add(v)
+		return
 	}
+	m.valBits.Add(v)
 }
 
 func (m *Metric) SetFloat64(v float64) {

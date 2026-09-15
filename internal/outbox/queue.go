@@ -51,6 +51,7 @@ type Config struct {
 // Outbox provides a bounded, thread-safe, context-aware queue for outbound payloads.
 type Outbox struct {
 	mu       sync.Mutex
+	cond     *sync.Cond
 	items    []Event
 	head     int
 	tail     int
@@ -58,7 +59,6 @@ type Outbox struct {
 	capacity int
 	policy   DropPolicy
 	closed   bool
-	notify   chan struct{}
 
 	enqueued uint64
 	dequeued uint64
@@ -70,12 +70,13 @@ func NewOutbox(cfg Config) *Outbox {
 	if cfg.Capacity <= 0 {
 		cfg.Capacity = 100
 	}
-	return &Outbox{
+	o := &Outbox{
 		items:    make([]Event, cfg.Capacity),
 		capacity: cfg.Capacity,
 		policy:   cfg.DropPolicy,
-		notify:   make(chan struct{}, 1),
 	}
+	o.cond = sync.NewCond(&o.mu)
+	return o
 }
 
 // Push queues an event according to the configured DropPolicy.
@@ -104,11 +105,7 @@ func (o *Outbox) Push(evt Event) error {
 	o.count++
 	o.enqueued++
 
-	// Signal waiting Pop goroutines without blocking
-	select {
-	case o.notify <- struct{}{}:
-	default:
-	}
+	o.cond.Broadcast()
 	o.mu.Unlock()
 
 	return nil
@@ -116,36 +113,48 @@ func (o *Outbox) Push(evt Event) error {
 
 // Pop dequeues the next event, blocking until an event is ready or ctx is canceled.
 func (o *Outbox) Pop(ctx context.Context) (Event, error) {
+	if err := ctx.Err(); err != nil {
+		return Event{}, err
+	}
+
+	if ctx.Done() != nil {
+		stop := make(chan struct{})
+		defer close(stop)
+
+		go func() {
+			select {
+			case <-ctx.Done():
+				o.cond.Broadcast()
+			case <-stop:
+			}
+		}()
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
 	for {
-		o.mu.Lock()
 		if o.count > 0 {
 			evt := o.items[o.head]
 			o.items[o.head] = Event{} // Clear reference to allow GC
 			o.head = (o.head + 1) % o.capacity
 			o.count--
 			o.dequeued++
-			// if multiple consumers call pop or multiple events arrive, dequeuing leaves remaining events
-			// without a notif token, causing waiting consumers to deadlock
-			if o.count > 0 {
-				select {
-				case o.notify <- struct{}{}:
-				default:
-				}
-			}
-			o.mu.Unlock()
 			return evt, nil
 		}
 
 		if o.closed {
-			o.mu.Unlock()
 			return Event{}, ErrQueueClosed
 		}
-		o.mu.Unlock()
 
-		select {
-		case <-ctx.Done():
-			return Event{}, ctx.Err()
-		case <-o.notify:
+		if err := ctx.Err(); err != nil {
+			return Event{}, err
+		}
+
+		o.cond.Wait()
+
+		if err := ctx.Err(); err != nil {
+			return Event{}, err
 		}
 	}
 }
@@ -174,7 +183,7 @@ func (o *Outbox) Close() {
 	o.mu.Lock()
 	if !o.closed {
 		o.closed = true
-		close(o.notify)
+		o.cond.Broadcast()
 	}
 	o.mu.Unlock()
 }

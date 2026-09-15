@@ -24,6 +24,21 @@ func TestMetricsCounterAndGauge(t *testing.T) {
 	}
 }
 
+func TestGaugeSetNoCorruption(t *testing.T) {
+	reg := NewRegistry()
+	g := reg.NewGauge("test_gauge_corruption", "Test gauge corruption description")
+
+	g.Set(42)
+	if got := g.Float64Value(); got != 42.0 {
+		t.Fatalf("Float64Value() = %v, want 42.0", got)
+	}
+
+	g.Set(100)
+	if got := g.Float64Value(); got != 100.0 {
+		t.Fatalf("Float64Value() = %v, want 100.0", got)
+	}
+}
+
 func TestMetricsHTTPHandler(t *testing.T) {
 	reg := NewRegistry()
 	c := reg.NewCounter("etd_test_events_total", "Total events count")
