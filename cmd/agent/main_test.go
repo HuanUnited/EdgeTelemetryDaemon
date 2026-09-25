@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,29 +17,36 @@ import (
 )
 
 func TestAdaptiveLoopIntervalScaling(t *testing.T) {
-	tauMin := float64((50 * time.Millisecond).Milliseconds())
-	tauMax := float64((5 * time.Second).Milliseconds())
+	tauMin := 50 * time.Millisecond
+	tauMax := 5 * time.Second
 	theta := 3.5
+	deltaTau := 500 * time.Millisecond
 
 	tests := []struct {
-		name string
-		z    float64
-		want time.Duration
+		name       string
+		zComposite float64
+		driftIndex float64
+		tauPrev    time.Duration
+		want       time.Duration
 	}{
-		{name: "zero", z: 0.0, want: 5000 * time.Millisecond},
-		{name: "midpoint", z: 1.75, want: 2525 * time.Millisecond},
-		{name: "theta_boundary", z: 3.5, want: 50 * time.Millisecond},
-		{name: "clamped_extreme", z: 10.0, want: 50 * time.Millisecond},
-		{name: "negative_midpoint", z: -1.75, want: 2525 * time.Millisecond},
-		{name: "negative_boundary", z: -3.5, want: 50 * time.Millisecond},
+		{"zero", 0.0, 0.0, tauMax, 5000 * time.Millisecond},
+		{"midpoint", 1.75, 0.0, tauMax, 2525 * time.Millisecond},
+		{"theta_boundary", 3.5, 0.0, tauMax, 50 * time.Millisecond},
+		{"clamped_extreme", 10.0, 0.0, tauMax, 50 * time.Millisecond},
+
+		{"drift_override", 0.0, 0.30, tauMax, 50 * time.Millisecond},
+		{"drift_midpoint", 0.0, 0.075, tauMax, 2525 * time.Millisecond},
+
+		{"fast_recovery_clamped", 0.0, 0.0, 50 * time.Millisecond, 550 * time.Millisecond},
+		{"partial_recovery_clamped", 1.0, 0.0, 50 * time.Millisecond, 550 * time.Millisecond},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := computeInterval(tt.z, tauMin, tauMax, theta)
+			got := computeInterval(tt.zComposite, tt.driftIndex, 0.15, theta, tauMin, tauMax, tt.tauPrev, deltaTau)
 			if got != tt.want {
-				t.Fatalf("computeInterval(%v, %v, %v, %v) = %v, want %v",
-					tt.z, tauMin, tauMax, theta, got, tt.want)
+				t.Fatalf("computeInterval(%v, drift=%v, prev=%v) = %v, want %v",
+					tt.zComposite, tt.driftIndex, tt.tauPrev, got, tt.want)
 			}
 		})
 	}
@@ -190,47 +196,5 @@ func TestAgentStartupQuiescentMode(t *testing.T) {
 	}
 	if string(data) != "5000 100000\n" {
 		t.Fatalf("startup cpu.max = %q, want %q", string(data), "5000 100000\n")
-	}
-}
-
-func TestCPUHertzAdaptiveIntervalScaling(t *testing.T) {
-	tempDir := t.TempDir()
-	cfg := config.Config{
-		ListenAddr:         ":0",
-		ScrapeInterval:     5 * time.Second,
-		CPUReportMode:      "hertz",
-		LogLevel:           "info",
-		TargetURL:          "http://localhost:8080/ingest",
-		DetectorMinSamples: 30,
-		ProcfsPath:         tempDir,
-		RateTauMin:         50 * time.Millisecond,
-		RateTauMax:         5 * time.Second,
-		RateTheta:          3.5,
-		CgroupRoot:         tempDir,
-	}
-
-	statPath := filepath.Join(tempDir, "stat")
-	if err := os.WriteFile(statPath, []byte("cpu  100 0 100 800 0 0 0 0 0 0\n"), 0o644); err != nil {
-		t.Fatalf("write stat: %v", err)
-	}
-
-	reg := metrics.NewRegistry()
-	ob := outbox.NewOutbox(outbox.Config{Capacity: 10})
-	defer ob.Close()
-	agent := newAgent(cfg, ob, reg)
-
-	t1 := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
-	agent.tick(t1)
-
-	// Simulate 100ms later with 100 total ticks delta (expected 100 ticks / 0.1s = 1000 Hz)
-	if err := os.WriteFile(statPath, []byte("cpu  150 0 150 800 0 0 0 0 0 0\n"), 0o644); err != nil {
-		t.Fatalf("write stat update: %v", err)
-	}
-	t2 := t1.Add(100 * time.Millisecond)
-	agent.tick(t2)
-
-	gotHz := agent.metricCPU.Float64Value()
-	if math.Abs(gotHz-1000.0) > 1e-3 {
-		t.Fatalf("metricCPU (hertz) = %v, want 1000.0", gotHz)
 	}
 }

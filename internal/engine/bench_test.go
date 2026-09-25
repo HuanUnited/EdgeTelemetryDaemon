@@ -5,31 +5,20 @@ import (
 	"testing"
 )
 
-// warmStream pre-populates the detector with stable values so benchmarks
-// exercise the post-warm-up Z-score path rather than the warm-up heuristic.
 func warmStream(d *ZScoreDetector) {
 	for range 100 {
-		d.Update(10)
+		d.Update(10.0, 10.0)
 	}
 }
 
-func BenchmarkWelfordUpdate(b *testing.B) {
-	var w Welford
+func BenchmarkEWMVUpdateNoEscape(b *testing.B) {
+	s := NewStreamingStats(0.1)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		w.Update(float64(i))
+		s.Update(float64(i))
 	}
-	_ = w
-}
-
-func BenchmarkWelfordUpdateNoEscape(b *testing.B) {
-	var w Welford
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		w.Update(float64(i))
-	}
-	if w.Count() == 0 {
-		b.Fatal("welford not updated")
+	if s.Count() == 0 {
+		b.Fatal("stats not updated")
 	}
 }
 
@@ -46,13 +35,11 @@ func BenchmarkZScore(b *testing.B) {
 	d := NewZScoreDetector(0.5, 0.05, 30, 3.5, 0.15)
 	warmStream(d)
 
-	// Alternate between normal and anomalous values so the Z-score path is
-	// exercised without the compiler being able to prove constancy.
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		x := 10 + float64(i&1)
-		d.Update(x)
+		d.Update(x, x)
 	}
 	if d.Count() == 0 {
 		b.Fatal("detector not updated")
@@ -68,17 +55,12 @@ func BenchmarkZScoreDetect(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		x := 10 + rng.NormFloat64()
-		if d.Update(x) {
-			// Consume the flag; keep the branch so the result is observable.
+		if d.Update(x, x) {
 			_ = d.ZScore()
 		}
 	}
 }
 
-// BenchmarkZScoreExtendedUpdate benchmarks the extended dual-horizon Update() execution path.
-//
-// Expected go test -bench=. -benchmem output:
-// BenchmarkZScoreExtendedUpdate-...  ... ns/op  0 B/op  0 allocs/op
 func BenchmarkZScoreExtendedUpdate(b *testing.B) {
 	d := NewZScoreDetector(0.1, 0.01, 30, 3.5, 0.15)
 	warmStream(d)
@@ -87,7 +69,7 @@ func BenchmarkZScoreExtendedUpdate(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		x := 10.0 + float64(i&1)*0.1
-		_ = d.Update(x)
+		_ = d.Update(x, x)
 	}
 	if d.Count() == 0 {
 		b.Fatal("detector not updated")

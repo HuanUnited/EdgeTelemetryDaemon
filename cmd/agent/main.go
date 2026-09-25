@@ -29,15 +29,18 @@ const (
 	defaultHoldoffDuration         = 10 * time.Second
 	defaultMinConsecutiveAnomalies = 2
 	defaultMinConsecutiveNormals   = 3
+	tauRecoveryStep                = 500 * time.Millisecond
 )
 
 type AnomalyPayload struct {
-	Timestamp     time.Time              `json:"timestamp"`
-	InferencesSec float64                `json:"inferences_per_sec"`
-	Baseline      float64                `json:"baseline"`
-	ZScore        float64                `json:"z_score"`
-	Threshold     float64                `json:"threshold"`
-	PreContext    []filter.SnapshotEntry `json:"pre_context"`
+	Timestamp   time.Time              `json:"timestamp"`
+	CPU         float64                `json:"cpu"`
+	Memory      float64                `json:"memory"`
+	BaselineCPU float64                `json:"baseline_cpu"`
+	BaselineMem float64                `json:"baseline_mem"`
+	ZScore      float64                `json:"z_score"`
+	Threshold   float64                `json:"threshold"`
+	PreContext  []filter.SnapshotEntry `json:"pre_context"`
 }
 
 type DriftPayload struct {
@@ -60,6 +63,7 @@ type Agent struct {
 	prevDrifting        bool
 	lastDriftAlert      time.Time
 	prevTick            time.Time
+	tauPrev             time.Duration
 	injectSpikes        atomic.Int32
 
 	metricScrapes    *metrics.Metric
@@ -93,6 +97,7 @@ func newAgent(cfg config.Config, ob *outbox.Outbox, reg *metrics.Registry) *Agen
 		aiGen:               collector.NewAIGen(collector.DefaultAIGenConfig()),
 		cgroupCtl:           cgroup.NewController(cfg.CgroupRoot),
 		prevSuppressorState: filter.StateNormal,
+		tauPrev:             cfg.RateTauMax,
 		metricScrapes:       reg.NewCounter("etd_scrapes_total", "Total telemetry scrape cycles performed"),
 		metricAnomalies:     reg.NewCounter("etd_anomalies_detected_total", "Total raw anomalies detected by engine"),
 		metricAlerts:        reg.NewCounter("etd_alerts_triggered_total", "Total alerts tripped past deadband suppressor"),
@@ -101,7 +106,6 @@ func newAgent(cfg config.Config, ob *outbox.Outbox, reg *metrics.Registry) *Agen
 		metricMem:           reg.NewGauge("etd_mem_used_bytes", "Host used memory in bytes"),
 	}
 
-	// Establish the documented baseline quiescent ceiling (5% quota) immediately upon boot.
 	if err := agent.cgroupCtl.SetQuiescent(); err != nil {
 		slog.Warn("failed to initialize quiescent cgroup quota", "error", err)
 	}
@@ -109,22 +113,37 @@ func newAgent(cfg config.Config, ob *outbox.Outbox, reg *metrics.Registry) *Agen
 	return agent
 }
 
-func computeInterval(z, tauMin, tauMax, theta float64) time.Duration {
-	if math.IsNaN(z) {
-		z = 0
+// computeInterval employs Effective Z-Score mapping with step-limited recovery to prevent relay chattering.
+func computeInterval(zComposite, driftIndex, driftThresh, theta float64, tauMin, tauMax, tauPrev, deltaTau time.Duration) time.Duration {
+	if math.IsNaN(zComposite) {
+		zComposite = 0
 	}
-	ratio := math.Abs(z) / theta
+	if math.IsNaN(driftIndex) {
+		driftIndex = 0
+	}
+
+	zEff := math.Max(zComposite, (driftIndex/driftThresh)*theta)
+	ratio := math.Abs(zEff) / theta
 	if ratio > 1.0 {
 		ratio = 1.0
 	}
-	ms := tauMax - (tauMax-tauMin)*ratio
-	if ms < tauMin {
-		ms = tauMin
+
+	tMin := float64(tauMin)
+	tMax := float64(tauMax)
+	tauTarget := time.Duration(tMax - (tMax-tMin)*ratio)
+
+	tauNext := tauTarget
+	// Apply relaxation logic: bound recovery increments by deltaTau to eliminate severe whiplash
+	if tauNext > tauPrev+deltaTau {
+		tauNext = tauPrev + deltaTau
 	}
-	return time.Duration(math.Round(ms)) * time.Millisecond
+	if tauNext < tauMin {
+		tauNext = tauMin
+	}
+	return tauNext
 }
 
-//nolint:funlen // This function coordinates a high-density, multi-step monitoring loop that should not be split up
+//nolint:funlen
 func (a *Agent) tick(now time.Time) time.Duration {
 	a.metricScrapes.Inc()
 
@@ -158,6 +177,9 @@ func (a *Agent) tick(now time.Time) time.Duration {
 	}
 
 	sample := a.aiGen.Next()
+	cpuVal := a.metricCPU.Float64Value()
+	memVal := a.metricMem.Float64Value()
+
 	for {
 		spikes := a.injectSpikes.Load()
 		if spikes <= 0 {
@@ -165,12 +187,14 @@ func (a *Agent) tick(now time.Time) time.Duration {
 		}
 		if a.injectSpikes.CompareAndSwap(spikes, spikes-1) {
 			sample.InferencesPerSec *= 50.0
+			cpuVal += 90.0 // Synthetic anomaly
+			memVal += 1e9  // Synthetic anomaly
 			break
 		}
 	}
 	a.metricThroughput.Set(uint64(sample.InferencesPerSec))
 
-	rawAnom := a.det.Update(sample.InferencesPerSec)
+	rawAnom := a.det.Update(cpuVal, memVal)
 	zScore := a.det.ZScore()
 	if rawAnom {
 		a.metricAnomalies.Inc()
@@ -193,23 +217,25 @@ func (a *Agent) tick(now time.Time) time.Duration {
 	}
 	a.prevSuppressorState = state
 
-	a.ringBuf.Push(filter.SnapshotEntry{Timestamp: now, Value: sample.InferencesPerSec, ZScore: zScore, Anomalous: isAnom})
+	a.ringBuf.Push(filter.SnapshotEntry{Timestamp: now, Value: cpuVal, ZScore: zScore, Anomalous: isAnom})
 	a.hb.Observe(sample.InferencesPerSec, isAnom, state == filter.StateSuppressed)
 
 	if shouldAlert {
 		a.metricAlerts.Inc()
 		var history [20]filter.SnapshotEntry
 		payload, err := json.Marshal(AnomalyPayload{
-			Timestamp:     now,
-			InferencesSec: sample.InferencesPerSec,
-			Baseline:      a.det.Baseline(),
-			ZScore:        zScore,
-			Threshold:     a.det.Threshold(),
-			PreContext:    a.ringBuf.Snapshot(history[:0]),
+			Timestamp:   now,
+			CPU:         cpuVal,
+			Memory:      memVal,
+			BaselineCPU: a.det.BaselineCPU(),
+			BaselineMem: a.det.BaselineMem(),
+			ZScore:      zScore,
+			Threshold:   a.det.Threshold(),
+			PreContext:  a.ringBuf.Snapshot(history[:0]),
 		})
 		if err == nil {
 			_ = a.ob.Push(outbox.Event{ID: fmt.Sprintf("alert-%d", now.UnixNano()), Type: outbox.EventAnomalyAlert, Timestamp: now, Data: payload})
-			slog.Warn("anomaly alert triggered", "z_score", zScore, "throughput", sample.InferencesPerSec)
+			slog.Warn("anomaly alert triggered", "z_score", zScore, "cpu", cpuVal, "mem", memVal)
 		}
 	}
 
@@ -241,9 +267,9 @@ func (a *Agent) tick(now time.Time) time.Duration {
 		}
 	}
 
-	tauMinMs := float64(a.cfg.RateTauMin) / float64(time.Millisecond)
-	tauMaxMs := float64(a.cfg.RateTauMax) / float64(time.Millisecond)
-	return computeInterval(zScore, tauMinMs, tauMaxMs, a.cfg.RateTheta)
+	nextTau := computeInterval(zScore, a.det.DriftIndex(), a.det.DriftThreshold(), a.cfg.RateTheta, a.cfg.RateTauMin, a.cfg.RateTauMax, a.tauPrev, tauRecoveryStep)
+	a.tauPrev = nextTau
+	return nextTau
 }
 
 func newMux(agent *Agent, reg *metrics.Registry, ob *outbox.Outbox) *http.ServeMux {

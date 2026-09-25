@@ -2,67 +2,43 @@ package engine
 
 import "math"
 
-// ZScoreDetector is a streaming anomaly filter that reports how many standard
-// deviations the latest observation sits from an adaptive baseline and evaluates
-// dual-horizon exponential moving average drift divergence.
-//
-// The baseline is maintained in complementary ways:
-//   - a fast EWMA of incoming values tracking adaptive reference mean;
-//   - a slow EWMA of incoming values tracking long-term baseline divergence; and
-//   - a Welford accumulator over demixed observations estimating local scale.
-//
-// When the Welford accumulator has not yet seen enough samples to estimate a
-// standard deviation (fewer than MinSamples), the detector falls back to a
-// fractional deviation heuristic so early observations are not flagged.
-//
-// The zero value is NOT ready to use; construct instances via NewZScoreDetector.
+// ZScoreDetector evaluates composite Z-scores across dual metrics (CPU and Memory)
+// using Euclidean norm and EWMV-backed tracking.
 type ZScoreDetector struct {
-	alpha          float64 // fast EWMA smoothing factor
-	alphaSlow      float64 // slow EWMA smoothing factor
-	minSamples     uint64  // minimum Welford samples before Z-score and drift are trustworthy
-	threshold      float64 // Z-score magnitude that triggers an anomaly
-	driftThreshold float64 // normalized drift divergence threshold
+	alpha          float64
+	alphaSlow      float64
+	minSamples     uint64
+	threshold      float64
+	driftThreshold float64
 
-	ewma       EWMA    // fast baseline tracking
-	ewmaSlow   EWMA    // slow baseline tracking
-	welf       Welford // running variance of the recent window
-	n          uint64  // total observations seen
-	last       float64 // most recent observation
-	zscore     float64 // most recent Z-score (or NaN before MinSamples)
-	driftIndex float64 // most recent normalized drift divergence index
-	drifting   bool    // reports whether detector is in a drifting state
+	cpuStats StreamingStats
+	memStats StreamingStats
+	cpuSlow  EWMA
+	memSlow  EWMA
+
+	n          uint64
+	lastCPU    float64
+	lastMem    float64
+	zscore     float64
+	driftIndex float64
+	drifting   bool
 }
 
-// NewZScoreDetector builds a detector with dual EWMA smoothing factors,
-// warm-up sample count, anomaly threshold, and drift divergence threshold.
-//
-//   - alphaFast is the fast EWMA factor in (0, 1]. Values <= 0 fall back to 0.5;
-//     values > 1 are clamped to 1.
-//   - alphaSlow is the slow EWMA factor in (0, 1]. Values <= 0 fall back to 0.5;
-//     values > 1 are clamped to 1. alphaSlow must be smaller than alphaFast; if
-//     alphaSlow >= alphaFast, it is scaled below alphaFast.
-//   - minSamples is the number of observations required before a real Z-score
-//     and drift index are evaluated; defaults to 30 when 0 is passed.
-//   - threshold is the Z-score magnitude that flags an anomaly; values <= 0 fall back to 3.5.
-//   - driftThreshold is the normalized drift divergence magnitude that flags drift;
-//     values <= 0 fall back to 0.15.
+// NewZScoreDetector constructs a dual-metric anomaly detector.
 func NewZScoreDetector(alphaFast, alphaSlow float64, minSamples uint64, threshold, driftThreshold float64) *ZScoreDetector {
 	if alphaFast <= 0 {
 		alphaFast = 0.5
 	} else if alphaFast > 1 {
 		alphaFast = 1.0
 	}
-
 	if alphaSlow <= 0 {
 		alphaSlow = 0.5
 	} else if alphaSlow > 1 {
 		alphaSlow = 1.0
 	}
-
 	if alphaSlow >= alphaFast {
 		alphaSlow = alphaFast * 0.1
 	}
-
 	if minSamples == 0 {
 		minSamples = 30
 	}
@@ -79,137 +55,102 @@ func NewZScoreDetector(alphaFast, alphaSlow float64, minSamples uint64, threshol
 		minSamples:     minSamples,
 		threshold:      threshold,
 		driftThreshold: driftThreshold,
-		ewma:           NewEWMA(alphaFast),
-		ewmaSlow:       NewEWMA(alphaSlow),
+		cpuStats:       NewStreamingStats(alphaFast),
+		memStats:       NewStreamingStats(alphaFast),
+		cpuSlow:        NewEWMA(alphaSlow),
+		memSlow:        NewEWMA(alphaSlow),
 		zscore:         math.NaN(),
-		driftIndex:     0,
-		drifting:       false,
 	}
 }
 
-// Update feeds the next observation x into the detector and returns whether it
-// is flagged as an anomaly. The first observation seeds the EWMA baselines and
-// is never flagged.
-//
-// Both fast and slow EWMA horizons are updated on every call. Normalized drift
-// divergence is computed and gated by minSamples.
-func (d *ZScoreDetector) Update(x float64) bool {
-	if math.IsNaN(x) || math.IsInf(x, 0) {
+// Update feeds paired CPU and Memory observations to evaluate statistical deviation.
+func (d *ZScoreDetector) Update(cpu, mem float64) bool {
+	if math.IsNaN(cpu) || math.IsInf(cpu, 0) || math.IsNaN(mem) || math.IsInf(mem, 0) {
 		return false
 	}
 
 	d.n++
-	d.last = x
 
-	// Update both moving average horizons prior to computing deviation so that
-	// high alphaFast tracking absorbs smooth trend shifts immediately without false spikes.
-	d.ewma.Update(x)
-	d.ewmaSlow.Update(x)
+	// 1. Evaluate Z-score using PRIOR state to prevent anomaly masking
+	zCPU, zMem := 0.0, 0.0
+	if d.n > d.minSamples {
+		meanCPU := d.cpuStats.Mean()
+		sdCPU := d.cpuStats.StdDev()
+		if sdCPU > 1e-12 && !math.IsNaN(sdCPU) {
+			zCPU = (cpu - meanCPU) / sdCPU
+		} else {
+			denom := math.Abs(meanCPU)
+			if denom < 1.0 {
+				denom = 1.0
+			}
+			zCPU = (cpu - meanCPU) / denom
+		}
 
-	driftDenom := math.Max(1.0, d.ewmaSlow.Value())
-	d.driftIndex = math.Abs(d.ewma.Value()-d.ewmaSlow.Value()) / driftDenom
+		meanMem := d.memStats.Mean()
+		sdMem := d.memStats.StdDev()
+		if sdMem > 1e-12 && !math.IsNaN(sdMem) {
+			zMem = (mem - meanMem) / sdMem
+		} else {
+			denom := math.Abs(meanMem)
+			if denom < 1.0 {
+				denom = 1.0
+			}
+			zMem = (mem - meanMem) / denom
+		}
 
-	if d.n == 1 {
+		d.zscore = math.Hypot(zCPU, zMem)
+	} else {
 		d.zscore = 0
-		d.drifting = false
-		return false
 	}
 
-	base := d.ewma.Value()
-	dev := x - base
+	// 2. Update tracking statistics
+	d.cpuStats.Update(cpu)
+	d.memStats.Update(mem)
+	d.cpuSlow.Update(cpu)
+	d.memSlow.Update(mem)
 
-	d.welf.Update(dev)
+	d.lastCPU = cpu
+	d.lastMem = mem
 
-	if d.welf.Count() < d.minSamples {
-		denom := math.Abs(base)
-		if denom < 1 {
-			denom = 1
-		}
-		d.zscore = dev / denom
+	// 3. Compute Normalized Drift Divergence
+	denomCPU := math.Max(1.0, math.Abs(d.cpuSlow.Value()))
+	driftCPU := math.Abs(d.cpuStats.Mean()-d.cpuSlow.Value()) / denomCPU
+
+	denomMem := math.Max(1.0, math.Abs(d.memSlow.Value()))
+	driftMem := math.Abs(d.memStats.Mean()-d.memSlow.Value()) / denomMem
+
+	// Use Chebyshev distance (max) for drift to preserve individual threshold semantics
+	d.driftIndex = math.Max(driftCPU, driftMem)
+
+	if d.n < d.minSamples {
 		d.drifting = false
 		return false
 	}
 
 	d.drifting = d.driftIndex > d.driftThreshold
 
-	sd := d.welf.StdDev()
-	if sd <= 1e-12 || math.IsNaN(sd) {
-		d.zscore = 0
-		return false
-	}
-
-	d.zscore = dev / sd
-	return math.Abs(d.zscore) >= d.threshold
+	return d.zscore >= d.threshold
 }
 
-// ZScore returns the Z-score of the most recent observation: the deviation
-// from the EWMA baseline divided by the Welford standard deviation. It returns
-// a signed deviation ratio during warm-up, and 0 for a constant stream (zero
-// scale). It returns NaN if no observation has been fed.
-func (d *ZScoreDetector) ZScore() float64 {
-	return d.zscore
-}
+func (d *ZScoreDetector) ZScore() float64          { return d.zscore }
+func (d *ZScoreDetector) Count() uint64            { return d.n }
+func (d *ZScoreDetector) BaselineCPU() float64     { return d.cpuStats.Mean() }
+func (d *ZScoreDetector) BaselineMem() float64     { return d.memStats.Mean() }
+func (d *ZScoreDetector) SlowBaselineCPU() float64 { return d.cpuSlow.Value() }
+func (d *ZScoreDetector) SlowBaselineMem() float64 { return d.memSlow.Value() }
+func (d *ZScoreDetector) Threshold() float64       { return d.threshold }
+func (d *ZScoreDetector) DriftThreshold() float64  { return d.driftThreshold }
+func (d *ZScoreDetector) DriftIndex() float64      { return d.driftIndex }
+func (d *ZScoreDetector) IsDrifting() bool         { return d.drifting }
 
-// Last returns the most recent observation fed to the detector.
-func (d *ZScoreDetector) Last() float64 {
-	return d.last
-}
-
-// Count returns the total number of observations fed to the detector.
-func (d *ZScoreDetector) Count() uint64 {
-	return d.n
-}
-
-// Baseline returns the current fast EWMA drift baseline.
-func (d *ZScoreDetector) Baseline() float64 {
-	return d.ewma.Value()
-}
-
-// SlowBaseline returns the current slow EWMA drift baseline.
-func (d *ZScoreDetector) SlowBaseline() float64 {
-	return d.ewmaSlow.Value()
-}
-
-// Alpha returns the configured fast EWMA smoothing factor.
-func (d *ZScoreDetector) Alpha() float64 {
-	return d.alpha
-}
-
-// AlphaSlow returns the configured slow EWMA smoothing factor.
-func (d *ZScoreDetector) AlphaSlow() float64 {
-	return d.alphaSlow
-}
-
-// Threshold returns the configured anomaly threshold.
-func (d *ZScoreDetector) Threshold() float64 {
-	return d.threshold
-}
-
-// DriftThreshold returns the configured drift divergence threshold.
-func (d *ZScoreDetector) DriftThreshold() float64 {
-	return d.driftThreshold
-}
-
-// DriftIndex returns the normalized drift divergence index between the fast
-// and slow EWMA baselines.
-func (d *ZScoreDetector) DriftIndex() float64 {
-	return d.driftIndex
-}
-
-// IsDrifting reports whether the normalized drift divergence index exceeds
-// the drift threshold after warm-up.
-func (d *ZScoreDetector) IsDrifting() bool {
-	return d.drifting
-}
-
-// Reset returns the detector to its initial state so it can be reused without
-// reallocation.
 func (d *ZScoreDetector) Reset() {
-	d.ewma.Reset()
-	d.ewmaSlow.Reset()
-	d.welf.Reset()
+	d.cpuStats.Reset()
+	d.memStats.Reset()
+	d.cpuSlow.Reset()
+	d.memSlow.Reset()
 	d.n = 0
-	d.last = 0
+	d.lastCPU = 0
+	d.lastMem = 0
 	d.zscore = math.NaN()
 	d.driftIndex = 0
 	d.drifting = false
