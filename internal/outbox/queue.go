@@ -53,7 +53,6 @@ type Config struct {
 // Outbox provides a bounded, thread-safe, context-aware queue for outbound payloads.
 type Outbox struct {
 	mu       sync.Mutex
-	cond     *sync.Cond
 	items    []Event
 	head     int
 	tail     int
@@ -61,6 +60,9 @@ type Outbox struct {
 	capacity int
 	policy   DropPolicy
 	closed   bool
+
+	closedCh chan struct{}
+	sem      chan struct{}
 
 	enqueued uint64
 	dequeued uint64
@@ -72,13 +74,13 @@ func NewOutbox(cfg Config) *Outbox {
 	if cfg.Capacity <= 0 {
 		cfg.Capacity = 100
 	}
-	o := &Outbox{
+	return &Outbox{
 		items:    make([]Event, cfg.Capacity),
 		capacity: cfg.Capacity,
 		policy:   cfg.DropPolicy,
+		closedCh: make(chan struct{}),
+		sem:      make(chan struct{}, cfg.Capacity),
 	}
-	o.cond = sync.NewCond(&o.mu)
-	return o
 }
 
 // Push queues an event according to the configured DropPolicy.
@@ -88,6 +90,8 @@ func (o *Outbox) Push(evt Event) error {
 		o.mu.Unlock()
 		return ErrQueueClosed
 	}
+
+	needsToken := o.count < o.capacity
 
 	if o.count == o.capacity {
 		o.dropped++
@@ -107,7 +111,12 @@ func (o *Outbox) Push(evt Event) error {
 	o.count++
 	o.enqueued++
 
-	o.cond.Broadcast()
+	if needsToken {
+		select {
+		case o.sem <- struct{}{}:
+		default:
+		}
+	}
 	o.mu.Unlock()
 
 	return nil
@@ -119,56 +128,70 @@ func (o *Outbox) Pop(ctx context.Context) (Event, error) {
 		return Event{}, err
 	}
 
+	// Fast path: if items are already present, dequeue immediately with zero allocations.
 	o.mu.Lock()
-	defer o.mu.Unlock()
+	if o.count > 0 {
+		evt := o.items[o.head]
+		o.items[o.head] = Event{} // Clear reference to allow GC
+		o.head = (o.head + 1) % o.capacity
+		o.count--
+		o.dequeued++
 
-	// Fast path: if items are already present, dequeue immediately with zero allocations
-	// and zero background goroutines regardless of context cancellability.
-	if o.count == 0 && ctx.Done() != nil {
-		stop := make(chan struct{})
-		defer close(stop)
-
-		go func() {
-			select {
-			case <-ctx.Done():
-				o.cond.Broadcast()
-			case <-stop:
-			}
-		}()
-
-		for o.count == 0 {
-			if o.closed {
-				return Event{}, ErrQueueClosed
-			}
-			if err := ctx.Err(); err != nil {
-				return Event{}, err
-			}
-			o.cond.Wait()
-			if err := ctx.Err(); err != nil {
-				return Event{}, err
-			}
+		// Opportunistically consume a semaphore token to keep it synchronized
+		select {
+		case <-o.sem:
+		default:
 		}
-	} else {
-		for o.count == 0 {
+
+		o.mu.Unlock()
+		return evt, nil
+	}
+	if o.closed {
+		o.mu.Unlock()
+		return Event{}, ErrQueueClosed
+	}
+	o.mu.Unlock()
+
+	// Slow path: allocation-free pure channel select
+	for {
+		select {
+		case <-ctx.Done():
+			return Event{}, ctx.Err()
+		case <-o.closedCh:
+			o.mu.Lock()
+			if o.count > 0 {
+				evt := o.items[o.head]
+				o.items[o.head] = Event{}
+				o.head = (o.head + 1) % o.capacity
+				o.count--
+				o.dequeued++
+				select {
+				case <-o.sem:
+				default:
+				}
+				o.mu.Unlock()
+				return evt, nil
+			}
+			o.mu.Unlock()
+			return Event{}, ErrQueueClosed
+		case <-o.sem:
+			o.mu.Lock()
+			if o.count > 0 {
+				evt := o.items[o.head]
+				o.items[o.head] = Event{}
+				o.head = (o.head + 1) % o.capacity
+				o.count--
+				o.dequeued++
+				o.mu.Unlock()
+				return evt, nil
+			}
 			if o.closed {
+				o.mu.Unlock()
 				return Event{}, ErrQueueClosed
 			}
-			if err := ctx.Err(); err != nil {
-				return Event{}, err
-			}
-			o.cond.Wait()
-			if err := ctx.Err(); err != nil {
-				return Event{}, err
-			}
+			o.mu.Unlock()
 		}
 	}
-
-	evt := o.items[o.head]
-	o.items[o.head] = Event{} // Clear reference to allow GC
-	o.head = (o.head + 1) % o.capacity
-	o.count--
-	o.dequeued++
-	return evt, nil
 }
 
 // Len returns the current number of queued events.
@@ -195,7 +218,7 @@ func (o *Outbox) Close() {
 	o.mu.Lock()
 	if !o.closed {
 		o.closed = true
-		o.cond.Broadcast()
+		close(o.closedCh)
 	}
 	o.mu.Unlock()
 }

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -67,6 +68,10 @@ func TestAdaptiveLoopIntervalScaling(t *testing.T) {
 
 func TestEndToEndQuotaRegulation(t *testing.T) {
 	tempDir := t.TempDir()
+
+	// Pre-create cpu.max so cgroup controller doesn't fall back to read-only mode
+	_ = os.WriteFile(filepath.Join(tempDir, "cpu.max"), []byte("max 100000\n"), 0o644)
+
 	cfg := config.Config{
 		ListenAddr:         ":0",
 		ScrapeInterval:     5 * time.Second,
@@ -95,7 +100,7 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 	var total, user uint64
 
 	// 1. Warm-up sequence
-	for range 100 {
+	for i := 0; i < 100; i++ {
 		now = now.Add(time.Second)
 		total += 1000
 		user += 100 // baseline 10% load
@@ -123,7 +128,7 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 	var alertEvt outbox.Event
 	var alertFired bool
 
-	for range 20 {
+	for i := 0; i < 20; i++ {
 		now = now.Add(time.Second)
 		total += 1000
 		user += 100 // The injector adds artificial payload dynamically inside tick()
@@ -174,7 +179,7 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 		agent.tick(now)
 	}
 
-	for range agent.suppCfg.MinConsecutiveNormals {
+	for i := 0; i < agent.suppCfg.MinConsecutiveNormals; i++ {
 		now = now.Add(time.Second)
 		total += 1000
 		user += 100
@@ -186,13 +191,18 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read cpu.max after recovery: %v", err)
 	}
-	if string(data) != "5000 100000\n" {
-		t.Fatalf("cpu.max after recovery = %q, want %q", string(data), "5000 100000\n")
+	expectedQuota := fmt.Sprintf("%d 100000\n", runtime.NumCPU()*5000)
+	if string(data) != expectedQuota {
+		t.Fatalf("cpu.max after recovery = %q, want %q", string(data), expectedQuota)
 	}
 }
 
 func TestAgentStartupQuiescentMode(t *testing.T) {
 	tempDir := t.TempDir()
+
+	// Pre-create cpu.max so cgroup controller doesn't fall back to read-only mode
+	_ = os.WriteFile(filepath.Join(tempDir, "cpu.max"), []byte("max 100000\n"), 0o644)
+
 	cfg := config.Config{
 		ListenAddr:         ":0",
 		ScrapeInterval:     5 * time.Second,
@@ -222,7 +232,9 @@ func TestAgentStartupQuiescentMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read cpu.max on startup: %v", err)
 	}
-	if string(data) != "5000 100000\n" {
-		t.Fatalf("startup cpu.max = %q, want %q", string(data), "5000 100000\n")
+
+	expectedQuota := fmt.Sprintf("%d 100000\n", runtime.NumCPU()*5000)
+	if string(data) != expectedQuota {
+		t.Fatalf("startup cpu.max = %q, want %q", string(data), expectedQuota)
 	}
 }

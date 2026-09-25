@@ -1,3 +1,4 @@
+// cmd/agent/main.go
 package main
 
 import (
@@ -7,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -66,6 +68,9 @@ type Agent struct {
 	tauPrev             time.Duration
 	injectSpikes        atomic.Int32
 
+	subsMu sync.RWMutex
+	subs   map[chan outbox.Event]struct{}
+
 	metricScrapes    *metrics.Metric
 	metricAnomalies  *metrics.Metric
 	metricAlerts     *metrics.Metric
@@ -104,6 +109,7 @@ func newAgent(cfg config.Config, ob *outbox.Outbox, reg *metrics.Registry) *Agen
 		cgroupCtl:           cgroup.NewController(cfg.CgroupRoot),
 		prevSuppressorState: filter.StateNormal,
 		tauPrev:             cfg.RateTauMax,
+		subs:                make(map[chan outbox.Event]struct{}),
 		metricScrapes:       reg.NewCounter("etd_scrapes_total", "Total telemetry scrape cycles performed"),
 		metricAnomalies:     reg.NewCounter("etd_anomalies_detected_total", "Total raw anomalies detected by engine"),
 		metricAlerts:        reg.NewCounter("etd_alerts_triggered_total", "Total alerts tripped past deadband suppressor"),
@@ -119,7 +125,35 @@ func newAgent(cfg config.Config, ob *outbox.Outbox, reg *metrics.Registry) *Agen
 	return agent
 }
 
-// computeInterval employs Effective Z-Score mapping with step-limited recovery to prevent relay chattering.
+func (a *Agent) subscribe() chan outbox.Event {
+	ch := make(chan outbox.Event, 64)
+	a.subsMu.Lock()
+	a.subs[ch] = struct{}{}
+	a.subsMu.Unlock()
+	return ch
+}
+
+func (a *Agent) unsubscribe(ch chan outbox.Event) {
+	a.subsMu.Lock()
+	if _, ok := a.subs[ch]; ok {
+		delete(a.subs, ch)
+		close(ch)
+	}
+	a.subsMu.Unlock()
+}
+
+func (a *Agent) broadcast(evt outbox.Event) {
+	a.subsMu.RLock()
+	defer a.subsMu.RUnlock()
+	for ch := range a.subs {
+		select {
+		case ch <- evt:
+		default:
+			// Drop event if subscriber is too slow
+		}
+	}
+}
+
 func computeInterval(zComposite, driftIndex, driftThresh, theta float64, tauMin, tauMax, tauPrev, deltaTau time.Duration) time.Duration {
 	if math.IsNaN(zComposite) {
 		zComposite = 0
@@ -139,7 +173,6 @@ func computeInterval(zComposite, driftIndex, driftThresh, theta float64, tauMin,
 	tauTarget := time.Duration(tMax - (tMax-tMin)*ratio)
 
 	tauNext := tauTarget
-	// Apply relaxation logic: bound recovery increments by deltaTau to eliminate severe whiplash
 	if tauNext > tauPrev+deltaTau {
 		tauNext = tauPrev + deltaTau
 	}
@@ -190,11 +223,11 @@ func (a *Agent) tick(now time.Time) time.Duration {
 		}
 		if a.injectSpikes.CompareAndSwap(spikes, spikes-1) {
 			if inferencesPerSec == 0 {
-				inferencesPerSec = 500.0 // guarantee baseline throughput representation during synthetic anomaly trigger
+				inferencesPerSec = 500.0
 			} else {
 				inferencesPerSec *= 50.0
 			}
-			cpuPct += 90.0 // Synthetic anomaly injection
+			cpuPct += 90.0
 			memPct += 90.0
 			break
 		}
@@ -241,7 +274,9 @@ func (a *Agent) tick(now time.Time) time.Duration {
 			PreContext:  a.ringBuf.Snapshot(history[:0]),
 		})
 		if err == nil {
-			_ = a.ob.Push(outbox.Event{ID: fmt.Sprintf("alert-%d", now.UnixNano()), Type: outbox.EventAnomalyAlert, Timestamp: now, Data: payload})
+			evt := outbox.Event{ID: fmt.Sprintf("alert-%d", now.UnixNano()), Type: outbox.EventAnomalyAlert, Timestamp: now, Data: payload}
+			_ = a.ob.Push(evt)
+			a.broadcast(evt)
 			slog.Warn("anomaly alert triggered", "z_score", zScore, "cpu_pct", cpuPct, "mem_pct", memPct)
 		}
 	}
@@ -254,12 +289,14 @@ func (a *Agent) tick(now time.Time) time.Duration {
 			DriftIndex: a.det.DriftIndex(),
 		})
 		if err == nil {
-			_ = a.ob.Push(outbox.Event{
+			evt := outbox.Event{
 				ID:        fmt.Sprintf("drift-%d", now.UnixNano()),
 				Type:      outbox.EventDriftAlert,
 				Timestamp: now,
 				Data:      payload,
-			})
+			}
+			_ = a.ob.Push(evt)
+			a.broadcast(evt)
 			slog.Warn("drift alert triggered", "drift_index", a.det.DriftIndex())
 		}
 	}
@@ -269,7 +306,9 @@ func (a *Agent) tick(now time.Time) time.Duration {
 		var summary filter.HeartbeatSummary
 		a.hb.Flush(now, &summary)
 		if hbData, err := json.Marshal(summary); err == nil {
-			_ = a.ob.Push(outbox.Event{ID: fmt.Sprintf("hb-%d", now.UnixNano()), Type: outbox.EventHeartbeat, Timestamp: now, Data: hbData})
+			evt := outbox.Event{ID: fmt.Sprintf("hb-%d", now.UnixNano()), Type: outbox.EventHeartbeat, Timestamp: now, Data: hbData}
+			_ = a.ob.Push(evt)
+			a.broadcast(evt)
 			slog.Debug("heartbeat flushed", "samples", summary.TotalSamples)
 		}
 	}
@@ -299,7 +338,97 @@ func newMux(agent *Agent, reg *metrics.Registry, ob *outbox.Outbox) *http.ServeM
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("anomaly burst scheduled (3 cycles)"))
 	})
+
+	// Server-Sent Events (SSE) Live Stream
+	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		ch := agent.subscribe()
+		defer agent.unsubscribe(ch)
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case evt, ok := <-ch:
+				if !ok {
+					return
+				}
+				data, err := json.Marshal(evt)
+				if err == nil {
+					_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+					flusher.Flush()
+				}
+			}
+		}
+	})
 	return mux
+}
+
+// startUDSServer runs a non-blocking IPC Unix Domain Socket server.
+func startUDSServer(ctx context.Context, agent *Agent, socketPath string) error {
+	_ = os.Remove(socketPath)
+	l, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return err
+	}
+	_ = os.Chmod(socketPath, 0666)
+
+	go func() {
+		<-ctx.Done()
+		_ = l.Close()
+	}()
+
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				slog.Error("UDS accept error", "error", err)
+				continue
+			}
+			go handleUDSConnection(ctx, agent, conn)
+		}
+	}()
+	return nil
+}
+
+func handleUDSConnection(ctx context.Context, agent *Agent, conn net.Conn) {
+	defer func(conn net.Conn) {
+		_ = conn.Close()
+	}(conn)
+	ch := agent.subscribe()
+	defer agent.unsubscribe(ch)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(evt)
+			if err == nil {
+				data = append(data, '\n')
+				// Protect main loop by dropping slow clients
+				_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				if _, err := conn.Write(data); err != nil {
+					return
+				}
+			}
+		}
+	}
 }
 
 func main() {
@@ -341,6 +470,10 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	if err := startUDSServer(ctx, agent, cfg.SocketPath); err != nil {
+		slog.Error("failed to start UDS server", "error", err)
+	}
+
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("HTTP server error", "error", err)
@@ -348,11 +481,15 @@ func main() {
 	}()
 
 	var wg sync.WaitGroup
-	wg.Go(func() {
-		if err := disp.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Error("dispatcher exited with error", "error", err)
-		}
-	})
+	if cfg.TargetURL != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := disp.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Error("dispatcher exited with error", "error", err)
+			}
+		}()
+	}
 
 	ticker := time.NewTicker(cfg.ScrapeInterval)
 	defer ticker.Stop()

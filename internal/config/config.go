@@ -18,6 +18,7 @@ const (
 	DefaultRateTauMax     = 5 * time.Second
 	DefaultRateTheta      = 3.5
 	DefaultCgroupRoot     = "" // Empty triggers auto-discovery
+	DefaultSocketPath     = "/tmp/etd.sock"
 )
 
 // Config holds the runtime configuration for the daemon. All fields are
@@ -35,6 +36,7 @@ type Config struct {
 	RateTauMax              time.Duration
 	RateTheta               float64
 	CgroupRoot              string
+	SocketPath              string
 	EnableSyntheticWorkload bool
 }
 
@@ -53,6 +55,7 @@ func Load() (Config, error) {
 		RateTauMax:              getenvDuration("ETD_RATE_TAU_MAX", DefaultRateTauMax),
 		RateTheta:               getenvFloat("ETD_RATE_THETA", DefaultRateTheta),
 		CgroupRoot:              getenv("ETD_CGROUP_ROOT", DefaultCgroupRoot),
+		SocketPath:              getenv("ETD_SOCKET_PATH", DefaultSocketPath),
 		EnableSyntheticWorkload: getenvBool("ETD_ENABLE_SYNTHETIC_WORKLOAD", false),
 	}
 	if err := cfg.validate(); err != nil {

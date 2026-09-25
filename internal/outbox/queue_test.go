@@ -49,7 +49,7 @@ func TestOutboxDropNewest(t *testing.T) {
 	_ = ob.Push(Event{ID: "2"})
 
 	err := ob.Push(Event{ID: "3"})
-	if !errors.Is(ErrQueueFull, err) {
+	if !errors.Is(err, ErrQueueFull) {
 		t.Errorf("Push() 3 = %v, want ErrQueueFull", err)
 	}
 
@@ -95,28 +95,30 @@ func TestOutboxConcurrent(_ *testing.T) {
 	const producers = 4
 	const itemsPerProducer = 250
 
-	for range producers {
-		wg.Go(func() {
-			for range itemsPerProducer {
+	for i := 0; i < producers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < itemsPerProducer; j++ {
 				_ = ob.Push(Event{ID: "test", Timestamp: time.Now()})
 			}
-		})
+		}()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	consumed := 0
 	var consWg sync.WaitGroup
-	consWg.Go(func() {
+	consWg.Add(1)
+	go func() {
+		defer consWg.Done()
 		for {
 			_, err := ob.Pop(ctx)
 			if err != nil {
 				return
 			}
-			consumed++
 		}
-	})
+	}()
 
 	wg.Wait()
 	time.Sleep(50 * time.Millisecond)
@@ -135,13 +137,16 @@ func TestOutboxNotificationMultiConsumerStarvation(t *testing.T) {
 	var err1, err2 error
 	var evt1, evt2 Event
 
-	wg.Go(func() {
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
 		evt1, err1 = ob.Pop(ctx)
-	})
+	}()
 
-	wg.Go(func() {
+	go func() {
+		defer wg.Done()
 		evt2, err2 = ob.Pop(ctx)
-	})
+	}()
 
 	time.Sleep(20 * time.Millisecond)
 
@@ -177,8 +182,10 @@ func TestOutboxNotificationRaceUnderClose(t *testing.T) {
 	var wg sync.WaitGroup
 	var closedErrors atomic.Int32
 
-	for range producers {
-		wg.Go(func() {
+	for i := 0; i < producers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			for {
 				err := ob.Push(Event{ID: "race-event"})
 				if errors.Is(err, ErrQueueClosed) {
@@ -186,7 +193,7 @@ func TestOutboxNotificationRaceUnderClose(t *testing.T) {
 					return
 				}
 			}
-		})
+		}()
 	}
 
 	time.Sleep(10 * time.Millisecond)

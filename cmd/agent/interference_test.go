@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -39,6 +41,10 @@ func drainAll(ctx context.Context, ob *outbox.Outbox) {
 func TestMultiTenantInterference(t *testing.T) {
 	dirA := t.TempDir()
 	dirB := t.TempDir()
+
+	// Pre-create cpu.max so cgroup controller doesn't fall back to read-only mode
+	_ = os.WriteFile(filepath.Join(dirA, "cpu.max"), []byte("max 100000\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dirB, "cpu.max"), []byte("max 100000\n"), 0o644)
 
 	cfgA := config.Config{
 		ListenAddr:         ":0",
@@ -83,7 +89,7 @@ func TestMultiTenantInterference(t *testing.T) {
 	now := baseTime
 	var totalA, userA, totalB, userB uint64
 
-	for range 250 {
+	for i := 0; i < 250; i++ {
 		now = now.Add(time.Second)
 		totalA += 1000
 		userA += 100
@@ -112,7 +118,7 @@ func TestMultiTenantInterference(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		currA := now
-		for i := range 60 {
+		for i := 0; i < 60; i++ {
 			currA = currA.Add(time.Second)
 			totalA += 1000
 			if i >= 5 && i < 8 {
@@ -130,7 +136,7 @@ func TestMultiTenantInterference(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		currB := now
-		for i := range 60 {
+		for i := 0; i < 60; i++ {
 			currB = currB.Add(time.Second)
 			totalB += 1000
 			if (i >= 5 && i < 8) || (i >= 35 && i < 38) {
@@ -190,26 +196,32 @@ func TestMultiTenantInterference(t *testing.T) {
 		t.Fatalf("Agent B final cgroup mode = %v, want %v", got, cgroup.ModeQuiescent)
 	}
 
+	expectedQuota := fmt.Sprintf("%d 100000\n", runtime.NumCPU()*5000)
+
 	cpuMaxA, err := os.ReadFile(filepath.Join(dirA, "cpu.max"))
 	if err != nil {
 		t.Fatalf("read dirA/cpu.max: %v", err)
 	}
-	if string(cpuMaxA) != "5000 100000\n" {
-		t.Fatalf("dirA/cpu.max = %q, want %q", string(cpuMaxA), "5000 100000\n")
+	if string(cpuMaxA) != expectedQuota {
+		t.Fatalf("dirA/cpu.max = %q, want %q", string(cpuMaxA), expectedQuota)
 	}
 
 	cpuMaxB, err := os.ReadFile(filepath.Join(dirB, "cpu.max"))
 	if err != nil {
 		t.Fatalf("read dirB/cpu.max: %v", err)
 	}
-	if string(cpuMaxB) != "5000 100000\n" {
-		t.Fatalf("dirB/cpu.max = %q, want %q", string(cpuMaxB), "5000 100000\n")
+	if string(cpuMaxB) != expectedQuota {
+		t.Fatalf("dirB/cpu.max = %q, want %q", string(cpuMaxB), expectedQuota)
 	}
 }
 
 func TestMultiTenantConcurrentModeIsolation(t *testing.T) {
 	dirA := t.TempDir()
 	dirB := t.TempDir()
+
+	// Pre-create cpu.max so cgroup controller doesn't fall back to read-only mode
+	_ = os.WriteFile(filepath.Join(dirA, "cpu.max"), []byte("max 100000\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dirB, "cpu.max"), []byte("max 100000\n"), 0o644)
 
 	cfgA := config.Config{
 		ListenAddr:         ":0",
