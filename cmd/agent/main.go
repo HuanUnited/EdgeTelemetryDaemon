@@ -27,6 +27,9 @@ import (
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/transport"
 )
 
+// Injected by ldflags during build
+var version = "dev"
+
 const (
 	defaultHoldoffDuration         = 10 * time.Second
 	defaultMinConsecutiveAnomalies = 2
@@ -71,12 +74,15 @@ type Agent struct {
 	subsMu sync.RWMutex
 	subs   map[chan outbox.Event]struct{}
 
-	metricScrapes    *metrics.Metric
-	metricAnomalies  *metrics.Metric
-	metricAlerts     *metrics.Metric
-	metricThroughput *metrics.Metric
-	metricCPU        *metrics.Metric
-	metricMem        *metrics.Metric
+	metricScrapes         *metrics.Metric
+	metricAnomalies       *metrics.Metric
+	metricAlerts          *metrics.Metric
+	metricThroughput      *metrics.Metric
+	metricCPU             *metrics.Metric
+	metricMem             *metrics.Metric
+	metricCgroupMode      *metrics.Metric
+	metricCgroupThrottled *metrics.Metric
+	metricCgroupReadOnly  *metrics.Metric
 
 	cpuStats   collector.CPUStats
 	prevCPU    collector.CPUStats
@@ -97,25 +103,34 @@ func newAgent(cfg config.Config, ob *outbox.Outbox, reg *metrics.Registry) *Agen
 	}
 
 	agent := &Agent{
-		cfg:                 cfg,
-		suppCfg:             suppCfg,
-		ob:                  ob,
-		reg:                 reg,
-		det:                 engine.NewZScoreDetector(0.1, 0.01, cfg.DetectorMinSamples, 3.0, 0.15),
-		supp:                filter.NewSuppressor(suppCfg),
-		ringBuf:             filter.NewRingBuffer(20),
-		hb:                  filter.NewHeartbeatAggregator(30 * time.Second),
-		aiGen:               aiGen,
-		cgroupCtl:           cgroup.NewController(cfg.CgroupRoot),
-		prevSuppressorState: filter.StateNormal,
-		tauPrev:             cfg.RateTauMax,
-		subs:                make(map[chan outbox.Event]struct{}),
-		metricScrapes:       reg.NewCounter("etd_scrapes_total", "Total telemetry scrape cycles performed"),
-		metricAnomalies:     reg.NewCounter("etd_anomalies_detected_total", "Total raw anomalies detected by engine"),
-		metricAlerts:        reg.NewCounter("etd_alerts_triggered_total", "Total alerts tripped past deadband suppressor"),
-		metricThroughput:    reg.NewGauge("etd_inferences_per_sec", "Current AI inference throughput metric"),
-		metricCPU:           reg.NewGauge("etd_cpu_utilization_percent", "Host CPU utilization percentage"),
-		metricMem:           reg.NewGauge("etd_mem_utilization_percent", "Host memory utilization percentage"),
+		cfg:                   cfg,
+		suppCfg:               suppCfg,
+		ob:                    ob,
+		reg:                   reg,
+		det:                   engine.NewZScoreDetector(0.1, 0.01, cfg.DetectorMinSamples, 3.0, 0.15),
+		supp:                  filter.NewSuppressor(suppCfg),
+		ringBuf:               filter.NewRingBuffer(20),
+		hb:                    filter.NewHeartbeatAggregator(30 * time.Second),
+		aiGen:                 aiGen,
+		cgroupCtl:             cgroup.NewController(cfg.CgroupRoot),
+		prevSuppressorState:   filter.StateNormal,
+		tauPrev:               cfg.RateTauMax,
+		subs:                  make(map[chan outbox.Event]struct{}),
+		metricScrapes:         reg.NewCounter("etd_scrapes_total", "Total telemetry scrape cycles performed"),
+		metricAnomalies:       reg.NewCounter("etd_anomalies_detected_total", "Total raw anomalies detected by engine"),
+		metricAlerts:          reg.NewCounter("etd_alerts_triggered_total", "Total alerts tripped past deadband suppressor"),
+		metricThroughput:      reg.NewGauge("etd_inferences_per_sec", "Current AI inference throughput metric"),
+		metricCPU:             reg.NewGauge("etd_cpu_utilization_percent", "Host CPU utilization percentage"),
+		metricMem:             reg.NewGauge("etd_mem_utilization_percent", "Host memory utilization percentage"),
+		metricCgroupMode:      reg.NewGauge("etd_cgroup_mode", "0=quiescent, 1=burst"),
+		metricCgroupThrottled: reg.NewGauge("etd_cgroup_throttled_usec_total", "Cumulative CFS throttled microseconds"),
+		metricCgroupReadOnly:  reg.NewGauge("etd_cgroup_read_only", "1 if running in telemetry-only mode without write access"),
+	}
+
+	if agent.cgroupCtl.IsReadOnly() {
+		agent.metricCgroupReadOnly.Set(1)
+	} else {
+		agent.metricCgroupReadOnly.Set(0)
 	}
 
 	if err := agent.cgroupCtl.SetQuiescent(); err != nil {
@@ -257,6 +272,17 @@ func (a *Agent) tick(now time.Time) time.Duration {
 	}
 	a.prevSuppressorState = state
 
+	// Update Cgroup Metrics
+	if a.cgroupCtl.Mode() == cgroup.ModeBurst {
+		a.metricCgroupMode.Set(1)
+	} else {
+		a.metricCgroupMode.Set(0)
+	}
+
+	if stat, err := a.cgroupCtl.ReadCPUStat(); err == nil {
+		a.metricCgroupThrottled.Set(stat.ThrottledUsec)
+	}
+
 	a.ringBuf.Push(filter.SnapshotEntry{Timestamp: now, Value: cpuPct, ZScore: zScore, Anomalous: isAnom})
 	a.hb.Observe(inferencesPerSec, isAnom, state == filter.StateSuppressed)
 
@@ -333,11 +359,19 @@ func newMux(agent *Agent, reg *metrics.Registry, ob *outbox.Outbox) *http.ServeM
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
-	mux.HandleFunc("/inject/anomaly", func(w http.ResponseWriter, _ *http.Request) {
-		agent.injectSpikes.Store(3)
+	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("anomaly burst scheduled (3 cycles)"))
+		_, _ = w.Write([]byte(version))
 	})
+
+	// Debug route gated by config flag
+	if agent.cfg.EnableDebugEndpoints {
+		mux.HandleFunc("/inject/anomaly", func(w http.ResponseWriter, _ *http.Request) {
+			agent.injectSpikes.Store(3)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("anomaly burst scheduled (3 cycles)"))
+		})
+	}
 
 	// Server-Sent Events (SSE) Live Stream
 	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
@@ -380,7 +414,8 @@ func startUDSServer(ctx context.Context, agent *Agent, socketPath string) error 
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(socketPath, 0666)
+	// Restrict permissions to owner (root or the user running the daemon)
+	_ = os.Chmod(socketPath, 0600)
 
 	go func() {
 		<-ctx.Done()
@@ -451,7 +486,11 @@ func main() {
 
 	agent := newAgent(cfg, ob, reg)
 	disp := transport.NewDispatcher(transport.DispatcherConfig{
-		TargetURL: cfg.TargetURL, MaxRetries: 3, InitialBackoff: 100 * time.Millisecond, MaxBackoff: 3 * time.Second,
+		TargetURL:      cfg.TargetURL,
+		AuthToken:      cfg.TargetAuthToken,
+		MaxRetries:     3,
+		InitialBackoff: 100 * time.Millisecond,
+		MaxBackoff:     3 * time.Second,
 	}, ob, reg)
 
 	mux := newMux(agent, reg, ob)

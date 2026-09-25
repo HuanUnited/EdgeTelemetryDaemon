@@ -8,9 +8,9 @@ DOCKER=docker
 # Complete default target pipeline
 all: test build
 
-# Compiling native daemon executable
+# Compiling native daemon executable (with injected git hash)
 build:
-	$(GO) build -v -ldflags="-w -s" -o bin/$(BINARY_NAME) ./cmd/agent
+	$(GO) build -v -ldflags="-w -s -X main.version=$$(git rev-parse --short HEAD 2>/dev/null || echo dev)" -o bin/$(BINARY_NAME) ./cmd/agent
 
 # Running test suite with race detector
 test:

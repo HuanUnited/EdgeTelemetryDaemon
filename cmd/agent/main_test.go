@@ -20,9 +20,10 @@ import (
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/outbox"
 )
 
-func init() {
-	// Suppress expected operational warnings from polluting test/benchmark output
+// Suppress expected operational warnings from polluting test/benchmark output
+func TestMain(m *testing.M) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	os.Exit(m.Run())
 }
 
 func writeProc(dir string, user, total, memTotal, memAvail uint64) {
@@ -73,17 +74,18 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(tempDir, "cpu.max"), []byte("max 100000\n"), 0o644)
 
 	cfg := config.Config{
-		ListenAddr:         ":0",
-		ScrapeInterval:     5 * time.Second,
-		CPUReportMode:      "percent",
-		LogLevel:           "info",
-		TargetURL:          "http://localhost:8080/ingest",
-		DetectorMinSamples: 30,
-		ProcfsPath:         tempDir,
-		RateTauMin:         50 * time.Millisecond,
-		RateTauMax:         5 * time.Second,
-		RateTheta:          3.5,
-		CgroupRoot:         tempDir,
+		ListenAddr:           ":0",
+		ScrapeInterval:       5 * time.Second,
+		CPUReportMode:        "percent",
+		LogLevel:             "info",
+		TargetURL:            "http://localhost:8080/ingest",
+		DetectorMinSamples:   30,
+		ProcfsPath:           tempDir,
+		RateTauMin:           50 * time.Millisecond,
+		RateTauMax:           5 * time.Second,
+		RateTheta:            3.5,
+		CgroupRoot:           tempDir,
+		EnableDebugEndpoints: true,
 	}
 
 	reg := metrics.NewRegistry()

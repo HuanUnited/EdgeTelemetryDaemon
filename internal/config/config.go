@@ -30,6 +30,7 @@ type Config struct {
 	CPUReportMode           string
 	LogLevel                string
 	TargetURL               string
+	TargetAuthToken         string
 	DetectorMinSamples      uint64
 	ProcfsPath              string
 	RateTauMin              time.Duration
@@ -38,6 +39,7 @@ type Config struct {
 	CgroupRoot              string
 	SocketPath              string
 	EnableSyntheticWorkload bool
+	EnableDebugEndpoints    bool
 }
 
 // Load reads configuration from environment variables, applies defaults for
@@ -49,6 +51,7 @@ func Load() (Config, error) {
 		CPUReportMode:           getenv("ETD_CPU_REPORT_MODE", DefaultCPUReportMode),
 		LogLevel:                getenv("ETD_LOG_LEVEL", DefaultLogLevel),
 		TargetURL:               getenv("ETD_TARGET_URL", "http://localhost:8080/ingest/dummy"),
+		TargetAuthToken:         getenv("ETD_TARGET_AUTH_TOKEN", ""),
 		DetectorMinSamples:      uint64(getenvInt("ETD_DETECTOR_MIN_SAMPLES", 30)),
 		ProcfsPath:              getenv("ETD_PROCFS_PATH", "/proc"),
 		RateTauMin:              getenvDuration("ETD_RATE_TAU_MIN", DefaultRateTauMin),
@@ -57,6 +60,7 @@ func Load() (Config, error) {
 		CgroupRoot:              getenv("ETD_CGROUP_ROOT", DefaultCgroupRoot),
 		SocketPath:              getenv("ETD_SOCKET_PATH", DefaultSocketPath),
 		EnableSyntheticWorkload: getenvBool("ETD_ENABLE_SYNTHETIC_WORKLOAD", false),
+		EnableDebugEndpoints:    getenvBool("ETD_ENABLE_DEBUG_ENDPOINTS", false),
 	}
 	if err := cfg.validate(); err != nil {
 		return Config{}, err

@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/metrics"
@@ -16,6 +17,7 @@ import (
 // DispatcherConfig configures HTTP endpoint telemetry delivery retries and backoff.
 type DispatcherConfig struct {
 	TargetURL      string
+	AuthToken      string // Bearer token for HTTP POST auth
 	Timeout        time.Duration
 	MaxRetries     int
 	InitialBackoff time.Duration
@@ -67,15 +69,28 @@ func NewDispatcher(cfg DispatcherConfig, ob *outbox.Outbox, reg *metrics.Registr
 	return d
 }
 
-// Run starts consuming events from the outbox until ctx is canceled.
+// Run starts consuming events from the outbox using a worker pool until ctx is canceled.
 func (d *Dispatcher) Run(ctx context.Context) error {
+	const numWorkers = 3
+	var wg sync.WaitGroup
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d.workerLoop(ctx)
+		}()
+	}
+
+	wg.Wait()
+	return ctx.Err()
+}
+
+func (d *Dispatcher) workerLoop(ctx context.Context) {
 	for {
 		evt, err := d.outbox.Pop(ctx)
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return err
+			return
 		}
 
 		if err := d.dispatchWithRetry(ctx, evt); err != nil {
@@ -134,6 +149,10 @@ func (d *Dispatcher) postEvent(ctx context.Context, evt outbox.Event) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", d.cfg.UserAgent)
 	req.Header.Set("X-Event-ID", evt.ID)
+
+	if d.cfg.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+d.cfg.AuthToken)
+	}
 
 	resp, err := d.client.Do(req)
 	if err != nil {

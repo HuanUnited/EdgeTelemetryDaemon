@@ -168,6 +168,13 @@ func (c *Controller) Mode() Mode {
 	return c.mode
 }
 
+// IsReadOnly returns true if the controller is in telemetry-only fallback mode.
+func (c *Controller) IsReadOnly() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.readOnly
+}
+
 // CPUStat mirrors the fields of cgroup v2's cpu.stat file that this daemon cares about.
 type CPUStat struct {
 	UsageUsec     uint64
