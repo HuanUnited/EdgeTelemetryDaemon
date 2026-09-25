@@ -89,7 +89,7 @@ func TestMultiTenantInterference(t *testing.T) {
 	now := baseTime
 	var totalA, userA, totalB, userB uint64
 
-	for i := 0; i < 250; i++ {
+	for range 250 {
 		now = now.Add(time.Second)
 		totalA += 1000
 		userA += 100
@@ -118,7 +118,7 @@ func TestMultiTenantInterference(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		currA := now
-		for i := 0; i < 60; i++ {
+		for i := range 60 {
 			currA = currA.Add(time.Second)
 			totalA += 1000
 			if i >= 5 && i < 8 {
@@ -136,7 +136,7 @@ func TestMultiTenantInterference(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		currB := now
-		for i := 0; i < 60; i++ {
+		for i := range 60 {
 			currB = currB.Add(time.Second)
 			totalB += 1000
 			if (i >= 5 && i < 8) || (i >= 35 && i < 38) {

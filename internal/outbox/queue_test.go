@@ -78,7 +78,7 @@ func TestOutboxContextCancellation(t *testing.T) {
 	ob := NewOutbox(Config{Capacity: 10})
 	defer ob.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 
 	_, err := ob.Pop(ctx)
@@ -87,7 +87,7 @@ func TestOutboxContextCancellation(t *testing.T) {
 	}
 }
 
-func TestOutboxConcurrent(_ *testing.T) {
+func TestOutboxConcurrent(t *testing.T) {
 	ob := NewOutbox(Config{Capacity: 100, DropPolicy: DropOldest})
 	defer ob.Close()
 
@@ -95,34 +95,30 @@ func TestOutboxConcurrent(_ *testing.T) {
 	const producers = 4
 	const itemsPerProducer = 250
 
-	for i := 0; i < producers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < itemsPerProducer; j++ {
+	for range producers {
+		wg.Go(func() {
+			for range itemsPerProducer {
 				_ = ob.Push(Event{ID: "test", Timestamp: time.Now()})
 			}
-		}()
+		})
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	var consWg sync.WaitGroup
-	consWg.Add(1)
-	go func() {
-		defer consWg.Done()
+	consWg.Go(func() {
 		for {
 			_, err := ob.Pop(ctx)
 			if err != nil {
 				return
 			}
 		}
-	}()
+	})
 
 	wg.Wait()
 	time.Sleep(50 * time.Millisecond)
-	cancel()
+	cancel() // Signals consumer to exit
 	consWg.Wait()
 }
 
@@ -137,16 +133,13 @@ func TestOutboxNotificationMultiConsumerStarvation(t *testing.T) {
 	var err1, err2 error
 	var evt1, evt2 Event
 
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		evt1, err1 = ob.Pop(ctx)
-	}()
+	})
 
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		evt2, err2 = ob.Pop(ctx)
-	}()
+	})
 
 	time.Sleep(20 * time.Millisecond)
 
@@ -182,10 +175,8 @@ func TestOutboxNotificationRaceUnderClose(t *testing.T) {
 	var wg sync.WaitGroup
 	var closedErrors atomic.Int32
 
-	for i := 0; i < producers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range producers {
+		wg.Go(func() {
 			for {
 				err := ob.Push(Event{ID: "race-event"})
 				if errors.Is(err, ErrQueueClosed) {
@@ -193,7 +184,7 @@ func TestOutboxNotificationRaceUnderClose(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	time.Sleep(10 * time.Millisecond)

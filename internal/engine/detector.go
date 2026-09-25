@@ -72,32 +72,9 @@ func (d *ZScoreDetector) Update(cpu, mem float64) bool {
 	d.n++
 
 	// 1. Evaluate Z-score using PRIOR state to prevent anomaly masking
-	zCPU, zMem := 0.0, 0.0
 	if d.n > d.minSamples {
-		meanCPU := d.cpuStats.Mean()
-		sdCPU := d.cpuStats.StdDev()
-		if sdCPU > 1e-12 && !math.IsNaN(sdCPU) {
-			zCPU = (cpu - meanCPU) / sdCPU
-		} else {
-			denom := math.Abs(meanCPU)
-			if denom < 1.0 {
-				denom = 1.0
-			}
-			zCPU = (cpu - meanCPU) / denom
-		}
-
-		meanMem := d.memStats.Mean()
-		sdMem := d.memStats.StdDev()
-		if sdMem > 1e-12 && !math.IsNaN(sdMem) {
-			zMem = (mem - meanMem) / sdMem
-		} else {
-			denom := math.Abs(meanMem)
-			if denom < 1.0 {
-				denom = 1.0
-			}
-			zMem = (mem - meanMem) / denom
-		}
-
+		zCPU := calculateZScore(cpu, d.cpuStats.Mean(), d.cpuStats.StdDev())
+		zMem := calculateZScore(mem, d.memStats.Mean(), d.memStats.StdDev())
 		d.zscore = math.Hypot(zCPU, zMem)
 	} else {
 		d.zscore = 0
@@ -130,6 +107,16 @@ func (d *ZScoreDetector) Update(cpu, mem float64) bool {
 	d.drifting = d.driftIndex > d.driftThreshold
 
 	return d.zscore >= d.threshold
+}
+
+// Helper to keep Update complexity low and eliminate wasted assignments
+func calculateZScore(val, mean, sd float64) float64 {
+	if sd > 1e-12 && !math.IsNaN(sd) {
+		return (val - mean) / sd
+	}
+
+	denom := math.Max(1.0, math.Abs(mean))
+	return (val - mean) / denom
 }
 
 func (d *ZScoreDetector) ZScore() float64          { return d.zscore }

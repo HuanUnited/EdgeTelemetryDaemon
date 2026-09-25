@@ -2,6 +2,8 @@ package engine
 
 import "math"
 
+// Welford calculates running variance.
+//
 // Deprecated: Welford is deprecated in favor of StreamingStats (EWMV) for non-stationary
 // telemetry streams to avoid statistical calcification as N approaches infinity.
 // Retained temporarily for backward compatibility with external integrations.

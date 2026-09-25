@@ -187,20 +187,41 @@ func computeInterval(zComposite, driftIndex, driftThresh, theta float64, tauMin,
 	tMax := float64(tauMax)
 	tauTarget := time.Duration(tMax - (tMax-tMin)*ratio)
 
-	tauNext := tauTarget
-	if tauNext > tauPrev+deltaTau {
-		tauNext = tauPrev + deltaTau
-	}
-	if tauNext < tauMin {
-		tauNext = tauMin
-	}
-	return tauNext
+	return max(tauMin, min(tauTarget, tauPrev+deltaTau))
 }
 
 func (a *Agent) tick(now time.Time) time.Duration {
 	a.metricScrapes.Inc()
 	a.prevTick = now
 
+	cpuPct, memPct, inferencesPerSec := a.collectUsage()
+
+	rawAnom := a.det.Update(cpuPct, memPct)
+	zScore := a.det.ZScore()
+	if rawAnom {
+		a.metricAnomalies.Inc()
+	}
+
+	isAnom := rawAnom || engine.IsSaturated(a.memStats.MemTotal, a.memStats.MemAvailable, 5.0)
+	shouldAlert, state := a.supp.Process(isAnom, now)
+
+	a.updateCgroup(state)
+	a.ringBuf.Push(filter.SnapshotEntry{Timestamp: now, Value: cpuPct, ZScore: zScore, Anomalous: isAnom})
+	a.hb.Observe(inferencesPerSec, isAnom, state == filter.StateSuppressed)
+
+	if shouldAlert {
+		a.emitAnomalyAlert(now, cpuPct, memPct, zScore)
+	}
+
+	a.handleDrift(now)
+	a.flushHeartbeat(now)
+
+	nextTau := computeInterval(zScore, a.det.DriftIndex(), a.det.DriftThreshold(), a.cfg.RateTheta, a.cfg.RateTauMin, a.cfg.RateTauMax, a.tauPrev, tauRecoveryStep)
+	a.tauPrev = nextTau
+	return nextTau
+}
+
+func (a *Agent) collectUsage() (float64, float64, float64) {
 	var cpuPct, memPct float64
 
 	if err := collector.CollectCPU(a.cfg.ProcfsPath, &a.cpuStats); err == nil {
@@ -227,8 +248,7 @@ func (a *Agent) tick(now time.Time) time.Duration {
 
 	var inferencesPerSec float64
 	if a.aiGen != nil {
-		sample := a.aiGen.Next()
-		inferencesPerSec = sample.InferencesPerSec
+		inferencesPerSec = a.aiGen.Next().InferencesPerSec
 	}
 
 	for {
@@ -249,30 +269,31 @@ func (a *Agent) tick(now time.Time) time.Duration {
 	}
 	a.metricThroughput.Set(uint64(inferencesPerSec))
 
-	rawAnom := a.det.Update(cpuPct, memPct)
-	zScore := a.det.ZScore()
-	if rawAnom {
-		a.metricAnomalies.Inc()
-	}
+	return cpuPct, memPct, inferencesPerSec
+}
 
-	isAnom := rawAnom
-	if engine.IsSaturated(a.memStats.MemTotal, a.memStats.MemAvailable, 5.0) {
-		isAnom = true
-	}
+func (a *Agent) updateCgroup(state filter.SuppressorState) {
+	if state != a.prevSuppressorState {
+		a.prevSuppressorState = state
 
-	shouldAlert, state := a.supp.Process(isAnom, now)
-	if state != a.prevSuppressorState && state == filter.StateAlerting {
-		if err := a.cgroupCtl.SetBurst(); err != nil {
-			slog.Error("failed to set cgroup burst quota", "error", err)
+		var err error
+		var quotaName string
+
+		switch state {
+		case filter.StateAlerting:
+			err = a.cgroupCtl.SetBurst()
+			quotaName = "burst"
+		case filter.StateNormal:
+			err = a.cgroupCtl.SetQuiescent()
+			quotaName = "quiescent"
+		case filter.StateSuppressed:
 		}
-	} else if state != a.prevSuppressorState && state == filter.StateNormal {
-		if err := a.cgroupCtl.SetQuiescent(); err != nil {
-			slog.Error("failed to set cgroup quiescent quota", "error", err)
+
+		if err != nil {
+			slog.Error("failed to set cgroup "+quotaName+" quota", "error", err)
 		}
 	}
-	a.prevSuppressorState = state
 
-	// Update Cgroup Metrics
 	if a.cgroupCtl.Mode() == cgroup.ModeBurst {
 		a.metricCgroupMode.Set(1)
 	} else {
@@ -282,31 +303,40 @@ func (a *Agent) tick(now time.Time) time.Duration {
 	if stat, err := a.cgroupCtl.ReadCPUStat(); err == nil {
 		a.metricCgroupThrottled.Set(stat.ThrottledUsec)
 	}
+}
 
-	a.ringBuf.Push(filter.SnapshotEntry{Timestamp: now, Value: cpuPct, ZScore: zScore, Anomalous: isAnom})
-	a.hb.Observe(inferencesPerSec, isAnom, state == filter.StateSuppressed)
+func (a *Agent) emitEvent(evt outbox.Event) {
+	_ = a.ob.Push(evt)
+	a.broadcast(evt)
+}
 
-	if shouldAlert {
-		a.metricAlerts.Inc()
-		var history [20]filter.SnapshotEntry
-		payload, err := json.Marshal(AnomalyPayload{
-			Timestamp:   now,
-			CPU:         cpuPct,
-			Memory:      memPct,
-			BaselineCPU: a.det.BaselineCPU(),
-			BaselineMem: a.det.BaselineMem(),
-			ZScore:      zScore,
-			Threshold:   a.det.Threshold(),
-			PreContext:  a.ringBuf.Snapshot(history[:0]),
-		})
-		if err == nil {
-			evt := outbox.Event{ID: fmt.Sprintf("alert-%d", now.UnixNano()), Type: outbox.EventAnomalyAlert, Timestamp: now, Data: payload}
-			_ = a.ob.Push(evt)
-			a.broadcast(evt)
-			slog.Warn("anomaly alert triggered", "z_score", zScore, "cpu_pct", cpuPct, "mem_pct", memPct)
-		}
+func (a *Agent) emitAnomalyAlert(now time.Time, cpuPct, memPct, zScore float64) {
+	a.metricAlerts.Inc()
+	var history [20]filter.SnapshotEntry
+	payload, err := json.Marshal(AnomalyPayload{
+		Timestamp:   now,
+		CPU:         cpuPct,
+		Memory:      memPct,
+		BaselineCPU: a.det.BaselineCPU(),
+		BaselineMem: a.det.BaselineMem(),
+		ZScore:      zScore,
+		Threshold:   a.det.Threshold(),
+		PreContext:  a.ringBuf.Snapshot(history[:0]),
+	})
+	if err != nil {
+		return
 	}
 
+	a.emitEvent(outbox.Event{
+		ID:        fmt.Sprintf("alert-%d", now.UnixNano()),
+		Type:      outbox.EventAnomalyAlert,
+		Timestamp: now,
+		Data:      payload,
+	})
+	slog.Warn("anomaly alert triggered", "z_score", zScore, "cpu_pct", cpuPct, "mem_pct", memPct)
+}
+
+func (a *Agent) handleDrift(now time.Time) {
 	isDrifting := a.det.IsDrifting()
 	if isDrifting && (!a.prevDrifting || now.Sub(a.lastDriftAlert) >= a.suppCfg.HoldoffDuration) {
 		a.lastDriftAlert = now
@@ -315,33 +345,37 @@ func (a *Agent) tick(now time.Time) time.Duration {
 			DriftIndex: a.det.DriftIndex(),
 		})
 		if err == nil {
-			evt := outbox.Event{
+			a.emitEvent(outbox.Event{
 				ID:        fmt.Sprintf("drift-%d", now.UnixNano()),
 				Type:      outbox.EventDriftAlert,
 				Timestamp: now,
 				Data:      payload,
-			}
-			_ = a.ob.Push(evt)
-			a.broadcast(evt)
+			})
 			slog.Warn("drift alert triggered", "drift_index", a.det.DriftIndex())
 		}
 	}
 	a.prevDrifting = isDrifting
+}
 
-	if a.hb.ShouldFlush(now) {
-		var summary filter.HeartbeatSummary
-		a.hb.Flush(now, &summary)
-		if hbData, err := json.Marshal(summary); err == nil {
-			evt := outbox.Event{ID: fmt.Sprintf("hb-%d", now.UnixNano()), Type: outbox.EventHeartbeat, Timestamp: now, Data: hbData}
-			_ = a.ob.Push(evt)
-			a.broadcast(evt)
-			slog.Debug("heartbeat flushed", "samples", summary.TotalSamples)
-		}
+func (a *Agent) flushHeartbeat(now time.Time) {
+	if !a.hb.ShouldFlush(now) {
+		return
 	}
 
-	nextTau := computeInterval(zScore, a.det.DriftIndex(), a.det.DriftThreshold(), a.cfg.RateTheta, a.cfg.RateTauMin, a.cfg.RateTauMax, a.tauPrev, tauRecoveryStep)
-	a.tauPrev = nextTau
-	return nextTau
+	var summary filter.HeartbeatSummary
+	a.hb.Flush(now, &summary)
+	hbData, err := json.Marshal(summary)
+	if err != nil {
+		return
+	}
+
+	a.emitEvent(outbox.Event{
+		ID:        fmt.Sprintf("hb-%d", now.UnixNano()),
+		Type:      outbox.EventHeartbeat,
+		Timestamp: now,
+		Data:      hbData,
+	})
+	slog.Debug("heartbeat flushed", "samples", summary.TotalSamples)
 }
 
 func newMux(agent *Agent, reg *metrics.Registry, ob *outbox.Outbox) *http.ServeMux {
@@ -410,7 +444,9 @@ func newMux(agent *Agent, reg *metrics.Registry, ob *outbox.Outbox) *http.ServeM
 // startUDSServer runs a non-blocking IPC Unix Domain Socket server.
 func startUDSServer(ctx context.Context, agent *Agent, socketPath string) error {
 	_ = os.Remove(socketPath)
-	l, err := net.Listen("unix", socketPath)
+
+	var lc net.ListenConfig
+	l, err := lc.Listen(ctx, "unix", socketPath)
 	if err != nil {
 		return err
 	}
@@ -521,13 +557,12 @@ func main() {
 
 	var wg sync.WaitGroup
 	if cfg.TargetURL != "" {
-		wg.Add(1)
-		go func() {
+		wg.Go(func() {
 			defer wg.Done()
 			if err := disp.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("dispatcher exited with error", "error", err)
 			}
-		}()
+		})
 	}
 
 	ticker := time.NewTicker(cfg.ScrapeInterval)

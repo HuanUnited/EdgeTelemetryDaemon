@@ -63,3 +63,8 @@ type CPUStat struct {
 func (c *Controller) ReadCPUStat() (CPUStat, error) {
 	return CPUStat{}, ErrUnsupportedPlatform
 }
+
+// IsReadOnly returns true on non-Linux systems.
+func (c *Controller) IsReadOnly() bool {
+	return true
+}

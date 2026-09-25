@@ -102,7 +102,7 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 	var total, user uint64
 
 	// 1. Warm-up sequence
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		now = now.Add(time.Second)
 		total += 1000
 		user += 100 // baseline 10% load
@@ -130,7 +130,7 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 	var alertEvt outbox.Event
 	var alertFired bool
 
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		now = now.Add(time.Second)
 		total += 1000
 		user += 100 // The injector adds artificial payload dynamically inside tick()

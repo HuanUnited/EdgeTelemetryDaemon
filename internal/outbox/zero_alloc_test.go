@@ -23,7 +23,7 @@ func BenchmarkOutboxPop(b *testing.B) {
 	defer ob.Close()
 	ctx := context.Background()
 	evt := Event{ID: "bench-id", Type: EventAnomalyAlert, Timestamp: time.Now()}
-	for i := 0; i < 1024; i++ {
+	for range 1024 {
 		_ = ob.Push(evt)
 	}
 
@@ -32,7 +32,7 @@ func BenchmarkOutboxPop(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if (i&1023) == 0 && i > 0 {
 			b.StopTimer()
-			for j := 0; j < 1024; j++ {
+			for range 1024 {
 				_ = ob.Push(evt)
 			}
 			b.StartTimer()
@@ -74,7 +74,7 @@ func TestOutboxPopAlloc(t *testing.T) {
 	ob := NewOutbox(Config{Capacity: runs + 10, DropPolicy: DropOldest})
 	defer ob.Close()
 	evt := Event{ID: "test-id", Type: EventAnomalyAlert, Timestamp: time.Now()}
-	for i := 0; i < runs+10; i++ {
+	for range runs + 10 {
 		_ = ob.Push(evt)
 	}
 
@@ -108,12 +108,11 @@ func TestOutboxPopWithActiveContextZeroAlloc(t *testing.T) {
 	ob := NewOutbox(Config{Capacity: runs + 10, DropPolicy: DropOldest})
 	defer ob.Close()
 	evt := Event{ID: "test-id", Type: EventAnomalyAlert, Timestamp: time.Now()}
-	for i := 0; i < runs+10; i++ {
+	for range runs + 10 {
 		_ = ob.Push(evt)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	allocs := testing.AllocsPerRun(runs, func() {
 		_, _ = ob.Pop(ctx)
@@ -129,12 +128,11 @@ func TestOutboxPopFastPathNoAllocation(t *testing.T) {
 	defer ob.Close()
 
 	evt := Event{ID: "bench-id", Type: EventAnomalyAlert, Timestamp: time.Now()}
-	for i := 0; i < runs+10; i++ {
+	for range runs + 10 {
 		_ = ob.Push(evt)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	allocs := testing.AllocsPerRun(runs, func() {
 		_, err := ob.Pop(ctx)

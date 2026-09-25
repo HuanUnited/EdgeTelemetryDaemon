@@ -58,14 +58,18 @@ const (
 	sysREAD   uintptr = syscall.SYS_READ
 
 	atFDCWD = ^uintptr(99)
+
+	writePermMask = 0o222
 )
 
 var (
 	errPathTooLong = errors.New("cgroup: path exceeds buffer capacity")
 	errOpenStat    = errors.New("cgroup: failed to open stat file")
 	errReadStat    = errors.New("cgroup: failed to read stat file")
+)
 
-	// Mutable vars to allow testing overrides
+//nolint:gochecknoglobals // Allowed for testing overrides
+var (
 	procSelfCgroup = "/proc/self/cgroup"
 	sysCgroupRoot  = "/sys/fs/cgroup"
 )
@@ -87,8 +91,11 @@ func NewController(cgroupRoot string) *Controller {
 	readOnly := false
 	cpuMaxPath := filepath.Join(root, cpuMaxFile)
 
-	// Probe for write permissions gracefully
-	if err := syscall.Access(cpuMaxPath, 2); err != nil { // 2 = W_OK
+	// Probe for write permissions gracefully.
+	// When running as root (UID 0 in Docker/CI), access(2) with W_OK succeeds even on 0444 files
+	// due to CAP_DAC_OVERRIDE. We check DAC permission bits explicitly in addition to access(2).
+	info, err := os.Stat(cpuMaxPath)
+	if err != nil || info.Mode().Perm()&writePermMask == 0 || syscall.Access(cpuMaxPath, 2) != nil {
 		readOnly = true
 		slog.Info("cgroup write access unavailable; running in telemetry-only monitoring mode", "path", root)
 	}
@@ -107,9 +114,8 @@ func discoverCgroupPath(provided string) string {
 	// Auto-discover the process's current cgroup leaf
 	data, err := os.ReadFile(procSelfCgroup)
 	if err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.HasPrefix(line, "0::") {
-				suffix := strings.TrimPrefix(line, "0::")
+		for line := range strings.SplitSeq(string(data), "\n") {
+			if suffix, found := strings.CutPrefix(line, "0::"); found {
 				return filepath.Join(sysCgroupRoot, suffix)
 			}
 		}
