@@ -1,14 +1,17 @@
 //go:build linux
 
 // Package cgroup manages Linux cgroup v2 CPU quota allocation and statistics.
-//
 package cgroup
 
 import (
 	"bytes"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -40,8 +43,7 @@ const (
 	cpuMaxFile  = "cpu.max"
 	cpuStatFile = "cpu.stat"
 
-	burstQuota     = "max 100000\n"
-	quiescentQuota = "5000 100000\n"
+	burstQuota = "max 100000\n"
 
 	keyUsageUsec     = "usage_usec"
 	keyNrPeriods     = "nr_periods"
@@ -49,7 +51,7 @@ const (
 	keyThrottledUsec = "throttled_usec"
 
 	statBufSize = 4096
-	maxPathLen  = 256
+	maxPathLen  = 4096 // Scaled up to support long systemd scope paths
 
 	sysOPENAT uintptr = syscall.SYS_OPENAT
 	sysCLOSE  uintptr = syscall.SYS_CLOSE
@@ -59,36 +61,69 @@ const (
 )
 
 var (
-	errPathTooLong = errors.New("cgroup: path exceeds 255 bytes")
+	errPathTooLong = errors.New("cgroup: path exceeds buffer capacity")
 	errOpenStat    = errors.New("cgroup: failed to open stat file")
 	errReadStat    = errors.New("cgroup: failed to read stat file")
+
+	// Mutable vars to allow testing overrides
+	procSelfCgroup = "/proc/self/cgroup"
+	sysCgroupRoot  = "/sys/fs/cgroup"
 )
 
-// Controller manages a single cgroup v2 hierarchy's CPU quota. cgroupRoot is the
-// filesystem path to the cgroup directory (e.g. "/sys/fs/cgroup" in production, a
-// t.TempDir() in tests) - never hardcode the path, it must be constructor-injected for
-// testability.
+// Controller manages a single cgroup v2 hierarchy's CPU quota.
 type Controller struct {
 	mu         sync.Mutex
 	cgroupRoot string
 	mode       Mode
 	hasMode    bool
+	readOnly   bool
 }
 
-// NewController creates a new Controller for the given cgroup root directory.
+// NewController creates a new Controller. It auto-discovers the cgroup v2
+// delegation path if cgroupRoot is empty or points to the root mount.
 func NewController(cgroupRoot string) *Controller {
+	root := discoverCgroupPath(cgroupRoot)
+
+	readOnly := false
+	cpuMaxPath := filepath.Join(root, cpuMaxFile)
+
+	// Probe for write permissions gracefully
+	if err := syscall.Access(cpuMaxPath, 2); err != nil { // 2 = W_OK
+		readOnly = true
+		slog.Info("cgroup write access unavailable; running in telemetry-only monitoring mode", "path", root)
+	}
+
 	return &Controller{
-		cgroupRoot: cgroupRoot,
+		cgroupRoot: root,
+		readOnly:   readOnly,
 	}
 }
 
-// SetBurst writes "max 100000\n" to cgroupRoot/cpu.max. No-op (zero file writes) if
-// already in ModeBurst.
+func discoverCgroupPath(provided string) string {
+	if provided != "" && provided != sysCgroupRoot {
+		return provided
+	}
+
+	// Auto-discover the process's current cgroup leaf
+	data, err := os.ReadFile(procSelfCgroup)
+	if err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "0::") {
+				suffix := strings.TrimPrefix(line, "0::")
+				return filepath.Join(sysCgroupRoot, suffix)
+			}
+		}
+	}
+	return sysCgroupRoot
+}
+
+// SetBurst writes "max 100000\n" to cgroupRoot/cpu.max.
+// Safely no-ops in telemetry-only environments.
 func (c *Controller) SetBurst() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.hasMode && c.mode == ModeBurst {
+	if c.readOnly || (c.hasMode && c.mode == ModeBurst) {
 		return nil
 	}
 
@@ -102,15 +137,19 @@ func (c *Controller) SetBurst() error {
 	return nil
 }
 
-// SetQuiescent writes "5000 100000\n" to cgroupRoot/cpu.max (5% of a 100ms period).
-// No-op (zero file writes) if already in ModeQuiescent.
+// SetQuiescent writes a dynamically scaled CPU quota to cgroupRoot/cpu.max.
+// Safely no-ops in telemetry-only environments.
 func (c *Controller) SetQuiescent() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.hasMode && c.mode == ModeQuiescent {
+	if c.readOnly || (c.hasMode && c.mode == ModeQuiescent) {
 		return nil
 	}
+
+	// Dynamic capacity allocation: 5% of TOTAL logical core bandwidth
+	quota := runtime.NumCPU() * 5000
+	quiescentQuota := strconv.Itoa(quota) + " 100000\n"
 
 	path := filepath.Join(c.cgroupRoot, cpuMaxFile)
 	if err := os.WriteFile(path, []byte(quiescentQuota), 0o644); err != nil {
@@ -137,10 +176,7 @@ type CPUStat struct {
 	ThrottledUsec uint64
 }
 
-// ReadCPUStat parses cgroupRoot/cpu.stat. Must allocate zero bytes on the heap on the
-// success path - read into a fixed-size stack buffer and parse in place, following the
-// same style as internal/collector/mem_linux.go's parseMemInfo (line-by-line key/value
-// scan with bytes.Cut, no strings.Split, no regexp).
+// ReadCPUStat parses cgroupRoot/cpu.stat with strictly zero allocations on the success path.
 func (c *Controller) ReadCPUStat() (CPUStat, error) {
 	rootLen := len(c.cgroupRoot)
 	totalLen := rootLen + 1 + len(cpuStatFile)

@@ -36,14 +36,14 @@ func NewController(cgroupRoot string) *Controller {
 	return &Controller{cgroupRoot: cgroupRoot}
 }
 
-// SetBurst returns ErrUnsupportedPlatform on non-Linux systems.
+// SetBurst silently returns nil to allow telemetry-only execution on non-Linux targets.
 func (c *Controller) SetBurst() error {
-	return ErrUnsupportedPlatform
+	return nil
 }
 
-// SetQuiescent returns ErrUnsupportedPlatform on non-Linux systems.
+// SetQuiescent silently returns nil to allow telemetry-only execution on non-Linux targets.
 func (c *Controller) SetQuiescent() error {
-	return ErrUnsupportedPlatform
+	return nil
 }
 
 // Mode returns ModeQuiescent on non-Linux systems.

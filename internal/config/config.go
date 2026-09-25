@@ -8,8 +8,7 @@ import (
 	"time"
 )
 
-// Default configuration values. These are kept exported so that callers that
-// do not need full CLI/env parsing can still rely on a sane baseline.
+// Default configuration values.
 const (
 	DefaultListenAddr     = ":8080"
 	DefaultScrapeInterval = 5 * time.Second
@@ -18,48 +17,24 @@ const (
 	DefaultRateTauMin     = 50 * time.Millisecond
 	DefaultRateTauMax     = 5 * time.Second
 	DefaultRateTheta      = 3.5
-	DefaultCgroupRoot     = "/sys/fs/cgroup"
+	DefaultCgroupRoot     = "" // Empty triggers auto-discovery
 )
 
 // Config holds the runtime configuration for the daemon. All fields are
 // treated as immutable after construction; validate() is the single place
 // where cross-field invariants are enforced.
 type Config struct {
-	// ListenAddr is the host:port the metrics endpoint binds to.
-	ListenAddr string
-
-	// ScrapeInterval controls how frequently the collectors sample the host.
-	ScrapeInterval time.Duration
-
-	// CPUReportMode selects how CPU utilisation is reported. One of
-	// "percent" (default), "ticks", or "hertz".
-	CPUReportMode string
-
-	// LogLevel is the slog level name: "debug", "info", "warn", or "error".
-	LogLevel string
-
-	// TargetURL is the ingest target of the daemon
-	TargetURL string
-
-	// DetectorMinSamples samples before detector activates
-	DetectorMinSamples uint64
-
-	// ProcfsPath ensures runtime procfs overrides are validated and accessible
-	ProcfsPath string
-
-	// RateTauMin is the lower bound sampling interval under peak anomaly.
-	RateTauMin time.Duration
-
-	// RateTauMax is the upper bound sampling interval under quiescent conditions.
-	RateTauMax time.Duration
-
-	// RateTheta is the sensitivity scaling parameter for adaptive sampling.
-	RateTheta float64
-
-	// CgroupRoot is the root filesystem path to the cgroup hierarchy.
-	CgroupRoot string
-
-	// EnableSyntheticWorkload toggles the AI token generator.
+	ListenAddr              string
+	ScrapeInterval          time.Duration
+	CPUReportMode           string
+	LogLevel                string
+	TargetURL               string
+	DetectorMinSamples      uint64
+	ProcfsPath              string
+	RateTauMin              time.Duration
+	RateTauMax              time.Duration
+	RateTheta               float64
+	CgroupRoot              string
 	EnableSyntheticWorkload bool
 }
 
@@ -86,8 +61,6 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// validate enforces all cross-field invariants. It is invoked once at Load
-// time; Config values are immutable afterwards.
 func (c Config) validate() error {
 	if c.ListenAddr == "" {
 		return fmt.Errorf("config: listen address must not be empty")
@@ -114,8 +87,6 @@ func (c Config) validate() error {
 	return nil
 }
 
-// getenv returns the value of the environment variable named by key, or def
-// when the variable is unset or empty.
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -123,8 +94,6 @@ func getenv(key, def string) string {
 	return def
 }
 
-// getenvDuration parses the environment variable named by key as a duration,
-// falling back to def when unset or unparseable.
 func getenvDuration(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
