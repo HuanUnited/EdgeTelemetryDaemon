@@ -1,5 +1,3 @@
-// Package config provides typed, validated configuration for the Edge AI
-// Telemetry Daemon.
 package config
 
 import (
@@ -60,34 +58,27 @@ type Config struct {
 
 	// CgroupRoot is the root filesystem path to the cgroup hierarchy.
 	CgroupRoot string
+
+	// EnableSyntheticWorkload toggles the AI token generator.
+	EnableSyntheticWorkload bool
 }
 
 // Load reads configuration from environment variables, applies defaults for
 // any value that is not set, and validates the resulting configuration.
-//
-// Recognised environment variables:
-//
-//	ETD_LISTEN_ADDR      host:port to bind (default ":8080")
-//	ETD_SCRAPE_INTERVAL  duration string, e.g. "5s" (default "5s")
-//	ETD_CPU_REPORT_MODE  "percent" | "ticks" | "hertz" (default "percent")
-//	ETD_LOG_LEVEL        "debug" | "info" | "warn" | "error" (default "info")
-//	ETD_RATE_TAU_MIN     duration string, e.g. "50ms" (default "50ms")
-//	ETD_RATE_TAU_MAX     duration string, e.g. "5s" (default "5s")
-//	ETD_RATE_THETA       float string, e.g. "3.5" (default "3.5")
-//	ETD_CGROUP_ROOT      filesystem path to cgroup v2 (default "/sys/fs/cgroup")
 func Load() (Config, error) {
 	cfg := Config{
-		ListenAddr:         strings.TrimSpace(getenv("ETD_LISTEN_ADDR", DefaultListenAddr)),
-		ScrapeInterval:     getenvDuration("ETD_SCRAPE_INTERVAL", DefaultScrapeInterval),
-		CPUReportMode:      getenv("ETD_CPU_REPORT_MODE", DefaultCPUReportMode),
-		LogLevel:           getenv("ETD_LOG_LEVEL", DefaultLogLevel),
-		TargetURL:          getenv("ETD_TARGET_URL", "http://localhost:8080/ingest/dummy"),
-		DetectorMinSamples: uint64(getenvInt("ETD_DETECTOR_MIN_SAMPLES", 30)),
-		ProcfsPath:         getenv("ETD_PROCFS_PATH", "/proc"),
-		RateTauMin:         getenvDuration("ETD_RATE_TAU_MIN", DefaultRateTauMin),
-		RateTauMax:         getenvDuration("ETD_RATE_TAU_MAX", DefaultRateTauMax),
-		RateTheta:          getenvFloat("ETD_RATE_THETA", DefaultRateTheta),
-		CgroupRoot:         getenv("ETD_CGROUP_ROOT", DefaultCgroupRoot),
+		ListenAddr:              strings.TrimSpace(getenv("ETD_LISTEN_ADDR", DefaultListenAddr)),
+		ScrapeInterval:          getenvDuration("ETD_SCRAPE_INTERVAL", DefaultScrapeInterval),
+		CPUReportMode:           getenv("ETD_CPU_REPORT_MODE", DefaultCPUReportMode),
+		LogLevel:                getenv("ETD_LOG_LEVEL", DefaultLogLevel),
+		TargetURL:               getenv("ETD_TARGET_URL", "http://localhost:8080/ingest/dummy"),
+		DetectorMinSamples:      uint64(getenvInt("ETD_DETECTOR_MIN_SAMPLES", 30)),
+		ProcfsPath:              getenv("ETD_PROCFS_PATH", "/proc"),
+		RateTauMin:              getenvDuration("ETD_RATE_TAU_MIN", DefaultRateTauMin),
+		RateTauMax:              getenvDuration("ETD_RATE_TAU_MAX", DefaultRateTauMax),
+		RateTheta:               getenvFloat("ETD_RATE_THETA", DefaultRateTheta),
+		CgroupRoot:              getenv("ETD_CGROUP_ROOT", DefaultCgroupRoot),
+		EnableSyntheticWorkload: getenvBool("ETD_ENABLE_SYNTHETIC_WORKLOAD", false),
 	}
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
@@ -156,6 +147,15 @@ func getenvFloat(key string, def float64) float64 {
 	if v := os.Getenv(key); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return f
+		}
+	}
+	return def
+}
+
+func getenvBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return def

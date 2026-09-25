@@ -85,6 +85,12 @@ func newAgent(cfg config.Config, ob *outbox.Outbox, reg *metrics.Registry) *Agen
 		MinConsecutiveAnomalies: defaultMinConsecutiveAnomalies,
 		MinConsecutiveNormals:   defaultMinConsecutiveNormals,
 	}
+
+	var aiGen *collector.AIGen
+	if cfg.EnableSyntheticWorkload {
+		aiGen = collector.NewAIGen(collector.DefaultAIGenConfig())
+	}
+
 	agent := &Agent{
 		cfg:                 cfg,
 		suppCfg:             suppCfg,
@@ -94,7 +100,7 @@ func newAgent(cfg config.Config, ob *outbox.Outbox, reg *metrics.Registry) *Agen
 		supp:                filter.NewSuppressor(suppCfg),
 		ringBuf:             filter.NewRingBuffer(20),
 		hb:                  filter.NewHeartbeatAggregator(30 * time.Second),
-		aiGen:               collector.NewAIGen(collector.DefaultAIGenConfig()),
+		aiGen:               aiGen,
 		cgroupCtl:           cgroup.NewController(cfg.CgroupRoot),
 		prevSuppressorState: filter.StateNormal,
 		tauPrev:             cfg.RateTauMax,
@@ -103,7 +109,7 @@ func newAgent(cfg config.Config, ob *outbox.Outbox, reg *metrics.Registry) *Agen
 		metricAlerts:        reg.NewCounter("etd_alerts_triggered_total", "Total alerts tripped past deadband suppressor"),
 		metricThroughput:    reg.NewGauge("etd_inferences_per_sec", "Current AI inference throughput metric"),
 		metricCPU:           reg.NewGauge("etd_cpu_utilization_percent", "Host CPU utilization percentage"),
-		metricMem:           reg.NewGauge("etd_mem_used_bytes", "Host used memory in bytes"),
+		metricMem:           reg.NewGauge("etd_mem_utilization_percent", "Host memory utilization percentage"),
 	}
 
 	if err := agent.cgroupCtl.SetQuiescent(); err != nil {
@@ -143,42 +149,39 @@ func computeInterval(zComposite, driftIndex, driftThresh, theta float64, tauMin,
 	return tauNext
 }
 
-//nolint:funlen
 func (a *Agent) tick(now time.Time) time.Duration {
 	a.metricScrapes.Inc()
-
-	elapsedSec := a.cfg.ScrapeInterval.Seconds()
-	if !a.prevTick.IsZero() && now.After(a.prevTick) {
-		elapsedSec = now.Sub(a.prevTick).Seconds()
-	}
 	a.prevTick = now
+
+	var cpuPct, memPct float64
 
 	if err := collector.CollectCPU(a.cfg.ProcfsPath, &a.cpuStats); err == nil {
 		if a.hasPrevCPU && a.cpuStats.Total > a.prevCPU.Total {
 			deltaTotal := float64(a.cpuStats.Total - a.prevCPU.Total)
 			deltaWork := float64((a.cpuStats.User + a.cpuStats.Nice + a.cpuStats.System) - (a.prevCPU.User + a.prevCPU.Nice + a.prevCPU.System))
-			switch a.cfg.CPUReportMode {
-			case "ticks":
-				a.metricCPU.SetFloat64(deltaWork)
-			case "hertz":
-				if elapsedSec > 0 {
-					a.metricCPU.SetFloat64(deltaTotal / elapsedSec)
-				}
-			default:
-				a.metricCPU.SetFloat64((deltaWork / deltaTotal) * 100.0)
-			}
+			cpuPct = (deltaWork / deltaTotal) * 100.0
+			a.metricCPU.SetFloat64(cpuPct)
+		} else {
+			cpuPct = a.metricCPU.Float64Value()
 		}
 		a.prevCPU = a.cpuStats
 		a.hasPrevCPU = true
+	} else {
+		cpuPct = a.metricCPU.Float64Value()
 	}
 
-	if err := collector.CollectMem(a.cfg.ProcfsPath, &a.memStats); err == nil && a.memStats.MemTotal >= a.memStats.MemAvailable {
-		a.metricMem.Set((a.memStats.MemTotal - a.memStats.MemAvailable) * 1024)
+	if err := collector.CollectMem(a.cfg.ProcfsPath, &a.memStats); err == nil && a.memStats.MemTotal > 0 && a.memStats.MemTotal >= a.memStats.MemAvailable {
+		memPct = (1.0 - float64(a.memStats.MemAvailable)/float64(a.memStats.MemTotal)) * 100.0
+		a.metricMem.SetFloat64(memPct)
+	} else {
+		memPct = a.metricMem.Float64Value()
 	}
 
-	sample := a.aiGen.Next()
-	cpuVal := a.metricCPU.Float64Value()
-	memVal := a.metricMem.Float64Value()
+	var inferencesPerSec float64
+	if a.aiGen != nil {
+		sample := a.aiGen.Next()
+		inferencesPerSec = sample.InferencesPerSec
+	}
 
 	for {
 		spikes := a.injectSpikes.Load()
@@ -186,15 +189,19 @@ func (a *Agent) tick(now time.Time) time.Duration {
 			break
 		}
 		if a.injectSpikes.CompareAndSwap(spikes, spikes-1) {
-			sample.InferencesPerSec *= 50.0
-			cpuVal += 90.0 // Synthetic anomaly
-			memVal += 1e9  // Synthetic anomaly
+			if inferencesPerSec == 0 {
+				inferencesPerSec = 500.0 // guarantee baseline throughput representation during synthetic anomaly trigger
+			} else {
+				inferencesPerSec *= 50.0
+			}
+			cpuPct += 90.0 // Synthetic anomaly injection
+			memPct += 90.0
 			break
 		}
 	}
-	a.metricThroughput.Set(uint64(sample.InferencesPerSec))
+	a.metricThroughput.Set(uint64(inferencesPerSec))
 
-	rawAnom := a.det.Update(cpuVal, memVal)
+	rawAnom := a.det.Update(cpuPct, memPct)
 	zScore := a.det.ZScore()
 	if rawAnom {
 		a.metricAnomalies.Inc()
@@ -217,16 +224,16 @@ func (a *Agent) tick(now time.Time) time.Duration {
 	}
 	a.prevSuppressorState = state
 
-	a.ringBuf.Push(filter.SnapshotEntry{Timestamp: now, Value: cpuVal, ZScore: zScore, Anomalous: isAnom})
-	a.hb.Observe(sample.InferencesPerSec, isAnom, state == filter.StateSuppressed)
+	a.ringBuf.Push(filter.SnapshotEntry{Timestamp: now, Value: cpuPct, ZScore: zScore, Anomalous: isAnom})
+	a.hb.Observe(inferencesPerSec, isAnom, state == filter.StateSuppressed)
 
 	if shouldAlert {
 		a.metricAlerts.Inc()
 		var history [20]filter.SnapshotEntry
 		payload, err := json.Marshal(AnomalyPayload{
 			Timestamp:   now,
-			CPU:         cpuVal,
-			Memory:      memVal,
+			CPU:         cpuPct,
+			Memory:      memPct,
 			BaselineCPU: a.det.BaselineCPU(),
 			BaselineMem: a.det.BaselineMem(),
 			ZScore:      zScore,
@@ -235,7 +242,7 @@ func (a *Agent) tick(now time.Time) time.Duration {
 		})
 		if err == nil {
 			_ = a.ob.Push(outbox.Event{ID: fmt.Sprintf("alert-%d", now.UnixNano()), Type: outbox.EventAnomalyAlert, Timestamp: now, Data: payload})
-			slog.Warn("anomaly alert triggered", "z_score", zScore, "cpu", cpuVal, "mem", memVal)
+			slog.Warn("anomaly alert triggered", "z_score", zScore, "cpu_pct", cpuPct, "mem_pct", memPct)
 		}
 	}
 

@@ -81,8 +81,16 @@ func TestMultiTenantInterference(t *testing.T) {
 
 	baseTime := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
 	now := baseTime
+	var totalA, userA, totalB, userB uint64
+
 	for range 250 {
 		now = now.Add(time.Second)
+		totalA += 1000
+		userA += 100
+		totalB += 1000
+		userB += 100
+		writeProc(dirA, userA, totalA, 1000000, 900000)
+		writeProc(dirB, userB, totalB, 1000000, 900000)
 		agentA.tick(now)
 		agentB.tick(now)
 	}
@@ -106,8 +114,13 @@ func TestMultiTenantInterference(t *testing.T) {
 		currA := now
 		for i := range 60 {
 			currA = currA.Add(time.Second)
-			if i == 5 {
-				agentA.injectSpikes.Store(3)
+			totalA += 1000
+			if i >= 5 && i < 8 {
+				userA += 900 // 90% load
+				writeProc(dirA, userA, totalA, 1000000, 100000)
+			} else {
+				userA += 100
+				writeProc(dirA, userA, totalA, 1000000, 900000)
 			}
 			agentA.tick(currA)
 		}
@@ -119,11 +132,13 @@ func TestMultiTenantInterference(t *testing.T) {
 		currB := now
 		for i := range 60 {
 			currB = currB.Add(time.Second)
-			if i == 5 {
-				agentB.injectSpikes.Store(3)
-			}
-			if i == 35 {
-				agentB.injectSpikes.Store(3)
+			totalB += 1000
+			if (i >= 5 && i < 8) || (i >= 35 && i < 38) {
+				userB += 900
+				writeProc(dirB, userB, totalB, 1000000, 100000)
+			} else {
+				userB += 100
+				writeProc(dirB, userB, totalB, 1000000, 900000)
 			}
 			agentB.tick(currB)
 		}
@@ -154,8 +169,6 @@ func TestMultiTenantInterference(t *testing.T) {
 		t.Fatalf("Agent B suppressor alerts fired = %d, want 2", alertsFiredB)
 	}
 
-	// EWMV adapts quickly; 3 consecutive spikes will trigger at least 2 raw anomalies before
-	// the baseline catches up. This satisfies the suppressor's 2-consecutive requirement.
 	if anomsA < 2 {
 		t.Fatalf("Agent A total anomalies = %d, want >= 2", anomsA)
 	}
@@ -238,8 +251,16 @@ func TestMultiTenantConcurrentModeIsolation(t *testing.T) {
 	agentB := newAgent(cfgB, obB, regB)
 
 	now := time.Date(2026, 9, 15, 11, 0, 0, 0, time.UTC)
+	var totalA, userA, totalB, userB uint64
+
 	for range 250 {
 		now = now.Add(time.Second)
+		totalA += 1000
+		userA += 100
+		totalB += 1000
+		userB += 100
+		writeProc(dirA, userA, totalA, 1000000, 900000)
+		writeProc(dirB, userB, totalB, 1000000, 900000)
 		agentA.tick(now)
 		agentB.tick(now)
 	}
@@ -261,8 +282,13 @@ func TestMultiTenantConcurrentModeIsolation(t *testing.T) {
 		currA := now
 		for i := range 10 {
 			currA = currA.Add(time.Second)
-			if i == 0 {
-				agentA.injectSpikes.Store(5)
+			totalA += 1000
+			if i >= 0 && i < 5 {
+				userA += 900
+				writeProc(dirA, userA, totalA, 1000000, 100000)
+			} else {
+				userA += 100
+				writeProc(dirA, userA, totalA, 1000000, 900000)
 			}
 			agentA.tick(currA)
 		}
@@ -274,6 +300,9 @@ func TestMultiTenantConcurrentModeIsolation(t *testing.T) {
 		currB := now
 		for range 10 {
 			currB = currB.Add(time.Second)
+			totalB += 1000
+			userB += 100
+			writeProc(dirB, userB, totalB, 1000000, 900000)
 			agentB.tick(currB)
 		}
 	}()

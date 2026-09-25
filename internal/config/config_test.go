@@ -27,6 +27,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.LogLevel != DefaultLogLevel {
 		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, DefaultLogLevel)
 	}
+	if cfg.EnableSyntheticWorkload != false {
+		t.Errorf("EnableSyntheticWorkload = %v, want false", cfg.EnableSyntheticWorkload)
+	}
 }
 
 func TestLoadFromEnv(t *testing.T) {
@@ -34,6 +37,7 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("ETD_SCRAPE_INTERVAL", "250ms")
 	t.Setenv("ETD_CPU_REPORT_MODE", "ticks")
 	t.Setenv("ETD_LOG_LEVEL", "debug")
+	t.Setenv("ETD_ENABLE_SYNTHETIC_WORKLOAD", "true")
 
 	cfg, err := Load()
 	if err != nil {
@@ -50,6 +54,9 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "debug")
+	}
+	if !cfg.EnableSyntheticWorkload {
+		t.Errorf("EnableSyntheticWorkload = %v, want true", cfg.EnableSyntheticWorkload)
 	}
 }
 

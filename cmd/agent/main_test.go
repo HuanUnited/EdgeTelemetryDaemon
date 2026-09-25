@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +18,18 @@ import (
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/metrics"
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/outbox"
 )
+
+func init() {
+	// Suppress expected operational warnings from polluting test/benchmark output
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func writeProc(dir string, user, total, memTotal, memAvail uint64) {
+	stat := fmt.Sprintf("cpu  %d 0 0 %d 0 0 0 0 0 0\n", user, total-user)
+	_ = os.WriteFile(filepath.Join(dir, "stat"), []byte(stat), 0o644)
+	mem := fmt.Sprintf("MemTotal: %d kB\nMemAvailable: %d kB\n", memTotal, memAvail)
+	_ = os.WriteFile(filepath.Join(dir, "meminfo"), []byte(mem), 0o644)
+}
 
 func TestAdaptiveLoopIntervalScaling(t *testing.T) {
 	tauMin := 50 * time.Millisecond
@@ -33,10 +48,8 @@ func TestAdaptiveLoopIntervalScaling(t *testing.T) {
 		{"midpoint", 1.75, 0.0, tauMax, 2525 * time.Millisecond},
 		{"theta_boundary", 3.5, 0.0, tauMax, 50 * time.Millisecond},
 		{"clamped_extreme", 10.0, 0.0, tauMax, 50 * time.Millisecond},
-
 		{"drift_override", 0.0, 0.30, tauMax, 50 * time.Millisecond},
 		{"drift_midpoint", 0.0, 0.075, tauMax, 2525 * time.Millisecond},
-
 		{"fast_recovery_clamped", 0.0, 0.0, 50 * time.Millisecond, 550 * time.Millisecond},
 		{"partial_recovery_clamped", 1.0, 0.0, 50 * time.Millisecond, 550 * time.Millisecond},
 	}
@@ -79,9 +92,14 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 	defer ts.Close()
 
 	now := time.Now()
+	var total, user uint64
 
+	// 1. Warm-up sequence
 	for range 100 {
 		now = now.Add(time.Second)
+		total += 1000
+		user += 100 // baseline 10% load
+		writeProc(tempDir, user, total, 1000000, 900000)
 		agent.tick(now)
 	}
 
@@ -92,6 +110,7 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 		_, _ = ob.Pop(ctx)
 	}
 
+	// 2. Trigger synthetic external injection API route
 	resp, err := http.Post(ts.URL+"/inject/anomaly", "application/json", nil)
 	if err != nil {
 		t.Fatalf("POST /inject/anomaly failed: %v", err)
@@ -106,6 +125,9 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 
 	for range 20 {
 		now = now.Add(time.Second)
+		total += 1000
+		user += 100 // The injector adds artificial payload dynamically inside tick()
+		writeProc(tempDir, user, total, 1000000, 900000)
 		agent.tick(now)
 		for ob.Len() > 0 {
 			evt, errPop := ob.Pop(ctx)
@@ -146,11 +168,17 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 
 	for agent.injectSpikes.Load() > 0 {
 		now = now.Add(time.Second)
+		total += 1000
+		user += 100
+		writeProc(tempDir, user, total, 1000000, 900000)
 		agent.tick(now)
 	}
 
 	for range agent.suppCfg.MinConsecutiveNormals {
 		now = now.Add(time.Second)
+		total += 1000
+		user += 100
+		writeProc(tempDir, user, total, 1000000, 900000)
 		agent.tick(now)
 	}
 
