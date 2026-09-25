@@ -27,12 +27,15 @@ type Metric struct {
 
 // Inc increments a counter or gauge metric by 1.
 func (m *Metric) Inc() {
+	if m.Type == TypeGauge {
+		m.Add(1)
+		return
+	}
 	m.valBits.Add(1)
 }
 
 // Add adds v to the counter or gauge metric.
 func (m *Metric) Add(v uint64) {
-	// Float bit handling in CAS loop
 	if m.Type == TypeGauge {
 		for {
 			oldBits := m.valBits.Load()
@@ -54,22 +57,24 @@ func (m *Metric) Set(v uint64) {
 		m.valBits.Store(math.Float64bits(float64(v)))
 		return
 	}
-	m.valBits.Add(v)
+	m.valBits.Store(v)
 }
 
+// SetFloat64 sets the floating-point value of a gauge metric.
 func (m *Metric) SetFloat64(v float64) {
 	m.valBits.Store(math.Float64bits(v))
 }
 
+// Float64Value returns the current float64 value of the metric.
 func (m *Metric) Float64Value() float64 {
 	bits := m.valBits.Load()
 	if m.Type == TypeGauge {
 		return math.Float64frombits(bits)
 	}
-	return math.Float64frombits(m.valBits.Load())
+	return float64(bits)
 }
 
-// Value returns the current value of the metric.
+// Value returns the current integer value of the metric.
 func (m *Metric) Value() uint64 {
 	if m.Type == TypeGauge {
 		return uint64(m.Float64Value())

@@ -94,9 +94,15 @@ func NewZScoreDetector(alphaFast, alphaSlow float64, minSamples uint64, threshol
 // Both fast and slow EWMA horizons are updated on every call. Normalized drift
 // divergence is computed and gated by minSamples.
 func (d *ZScoreDetector) Update(x float64) bool {
+	if math.IsNaN(x) || math.IsInf(x, 0) {
+		return false
+	}
+
 	d.n++
 	d.last = x
 
+	// Update both moving average horizons prior to computing deviation so that
+	// high alphaFast tracking absorbs smooth trend shifts immediately without false spikes.
 	d.ewma.Update(x)
 	d.ewmaSlow.Update(x)
 
@@ -127,7 +133,7 @@ func (d *ZScoreDetector) Update(x float64) bool {
 	d.drifting = d.driftIndex > d.driftThreshold
 
 	sd := d.welf.StdDev()
-	if sd == 0 || math.IsNaN(sd) {
+	if sd <= 1e-12 || math.IsNaN(sd) {
 		d.zscore = 0
 		return false
 	}

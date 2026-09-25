@@ -61,3 +61,28 @@ func TestMetricsHTTPHandler(t *testing.T) {
 		t.Errorf("Missing metric value in response body:\n%s", body)
 	}
 }
+
+func TestMetricGaugeIncAndCounterSetBehavior(t *testing.T) {
+	reg := NewRegistry()
+	g := reg.NewGauge("test_gauge_inc", "Gauge Inc test")
+	c := reg.NewCounter("test_counter_set", "Counter Set test")
+
+	g.Set(10)
+	g.Inc()
+	if got := g.Float64Value(); got != 11.0 {
+		t.Fatalf("Gauge Inc resulted in %v, want 11.0", got)
+	}
+
+	c.Set(50)
+	if got := c.Value(); got != 50 {
+		t.Fatalf("Counter Set resulted in %v, want 50", got)
+	}
+	c.Set(25)
+	if got := c.Value(); got != 25 {
+		t.Fatalf("Counter second Set resulted in %v, want 25", got)
+	}
+
+	if got := c.Float64Value(); got != 25.0 {
+		t.Fatalf("Counter Float64Value resulted in %v, want 25.0", got)
+	}
+}

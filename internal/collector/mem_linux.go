@@ -33,23 +33,24 @@ var (
 // comfortably under 4 KiB on all supported kernels.
 const memBufSize = 4096
 
-// CollectMem populates out with host memory statistics read from
-// DefaultProcMemInfoPath. No heap allocations occur on the success path.
+// CollectMem populates out with host memory statistics read from procPath/meminfo.
+// Zero heap allocations on execution.
 func CollectMem(procPath string, out *MemStats) error {
-	return scrapeProcMemInfo(procPath+"/meminfo", out)
-}
-
-// scrapeProcMemInfo parses the file at path (expected to be /proc/meminfo)
-// into out. The caller supplies the output value by pointer so that the method
-// allocates nothing on the hot path. Fields not present in the file are left at
-// their zero value; a file that contains no recognised fields is an error.
-func scrapeProcMemInfo(path string, out *MemStats) error {
-	if len(path) >= 256 {
+	totalLen := len(procPath) + 1 + len("meminfo")
+	if totalLen >= 256 {
 		return errPathTooLong
 	}
+
 	var pathBuf [256]byte
-	copy(pathBuf[:], path)
-	pathBuf[len(path)] = 0
+	n := copy(pathBuf[:], procPath)
+	if n > 0 && pathBuf[n-1] == '/' {
+		n += copy(pathBuf[n:], "meminfo")
+	} else {
+		pathBuf[n] = '/'
+		n++
+		n += copy(pathBuf[n:], "meminfo")
+	}
+	pathBuf[n] = 0
 
 	fd, _, errno := syscall.Syscall6(sysOPENAT, atFDCWD, uintptr(unsafe.Pointer(&pathBuf[0])), uintptr(syscall.O_RDONLY), 0, 0, 0)
 	if errno != 0 {
@@ -60,14 +61,14 @@ func scrapeProcMemInfo(path string, out *MemStats) error {
 	}()
 
 	var buf [memBufSize]byte
-	n, _, rerr := syscall.Syscall(sysREAD, fd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	readN, _, rerr := syscall.Syscall(sysREAD, fd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if rerr != 0 {
 		return errReadMemInfo
 	}
-	if int(n) == memBufSize {
+	if int(readN) == memBufSize {
 		return errMemInfoBufferFull
 	}
-	return parseMemInfo(buf[:n], out)
+	return parseMemInfo(buf[:readN], out)
 }
 
 func parseMemInfo(data []byte, out *MemStats) error {

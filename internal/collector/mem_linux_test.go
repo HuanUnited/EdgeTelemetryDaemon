@@ -1,8 +1,12 @@
+//go:build linux
+
 package collector
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -19,15 +23,16 @@ SwapFree:        1048576 kB
 Dirty:               128 kB
 `
 
-func TestScrapeProcMemInfo(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "meminfo")
-	if err := os.WriteFile(path, []byte(sampleMemInfo), 0o644); err != nil {
+func TestCollectMem(t *testing.T) {
+	dir := t.TempDir()
+	memPath := filepath.Join(dir, "meminfo")
+	if err := os.WriteFile(memPath, []byte(sampleMemInfo), 0o644); err != nil {
 		t.Fatalf("write sample meminfo: %v", err)
 	}
 
 	var out MemStats
-	if err := scrapeProcMemInfo(path, &out); err != nil {
-		t.Fatalf("scrapeProcMemInfo() returned error: %v", err)
+	if err := CollectMem(dir, &out); err != nil {
+		t.Fatalf("CollectMem(%q) failed: %v", dir, err)
 	}
 
 	want := MemStats{
@@ -40,26 +45,44 @@ func TestScrapeProcMemInfo(t *testing.T) {
 		SwapFree:     1048576,
 	}
 	if out != want {
-		t.Errorf("scrapeProcMemInfo() = %+v, want %+v", out, want)
+		t.Errorf("CollectMem() = %+v, want %+v", out, want)
+	}
+
+	// Verify trailing slash handling does not corrupt stack buffer path
+	var outTrailing MemStats
+	if err := CollectMem(dir+"/", &outTrailing); err != nil {
+		t.Fatalf("CollectMem(%q) with trailing slash failed: %v", dir+"/", err)
+	}
+	if outTrailing != want {
+		t.Errorf("CollectMem with trailing slash = %+v, want %+v", outTrailing, want)
 	}
 }
 
-func TestScrapeProcMemInfoMissingFields(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "meminfo")
-	if err := os.WriteFile(path, []byte("Active: 123 kB\nDirty: 456 kB\n"), 0o644); err != nil {
+func TestCollectMemMissingFields(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "meminfo"), []byte("Active: 123 kB\nDirty: 456 kB\n"), 0o644); err != nil {
 		t.Fatalf("write meminfo: %v", err)
 	}
 
 	var out MemStats
-	if err := scrapeProcMemInfo(path, &out); err == nil {
-		t.Fatalf("scrapeProcMemInfo() on file with no recognised fields = nil error, want error")
+	if err := CollectMem(dir, &out); err == nil {
+		t.Fatalf("CollectMem on file with no recognised fields = nil error, want error")
 	}
 }
 
-func TestScrapeProcMemInfoMissingFile(t *testing.T) {
+func TestCollectMemMissingFile(t *testing.T) {
 	var out MemStats
-	if err := scrapeProcMemInfo(filepath.Join(t.TempDir(), "nope"), &out); err == nil {
-		t.Fatalf("scrapeProcMemInfo() on missing file = nil error, want error")
+	if err := CollectMem(filepath.Join(t.TempDir(), "nonexistent"), &out); err == nil {
+		t.Fatalf("CollectMem on missing directory = nil error, want error")
+	}
+}
+
+func TestCollectMemPathTooLong(t *testing.T) {
+	longPath := "/" + strings.Repeat("m", 260)
+	var out MemStats
+	err := CollectMem(longPath, &out)
+	if !errors.Is(err, errPathTooLong) {
+		t.Fatalf("CollectMem(longPath) err = %v, want %v", err, errPathTooLong)
 	}
 }
 

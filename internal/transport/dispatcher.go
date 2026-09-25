@@ -79,7 +79,8 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		}
 
 		if err := d.dispatchWithRetry(ctx, evt); err != nil {
-			if d.metricFailures != nil {
+			// Do not record an operational transmission failure if dispatch was interrupted by shutdown
+			if ctx.Err() == nil && d.metricFailures != nil {
 				d.metricFailures.Inc()
 			}
 		} else {
@@ -139,7 +140,8 @@ func (d *Dispatcher) postEvent(ctx context.Context, evt outbox.Event) error {
 		return fmt.Errorf("HTTP post: %w", err)
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		// Cap discarded payload bytes to 64 KiB to prevent denial-of-service hanging
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
 		_ = resp.Body.Close()
 	}()
 

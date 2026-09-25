@@ -58,6 +58,8 @@ type Agent struct {
 	cgroupCtl           *cgroup.Controller
 	prevSuppressorState filter.SuppressorState
 	prevDrifting        bool
+	lastDriftAlert      time.Time
+	prevTick            time.Time
 	injectSpikes        atomic.Int32
 
 	metricScrapes    *metrics.Metric
@@ -79,7 +81,7 @@ func newAgent(cfg config.Config, ob *outbox.Outbox, reg *metrics.Registry) *Agen
 		MinConsecutiveAnomalies: defaultMinConsecutiveAnomalies,
 		MinConsecutiveNormals:   defaultMinConsecutiveNormals,
 	}
-	return &Agent{
+	agent := &Agent{
 		cfg:                 cfg,
 		suppCfg:             suppCfg,
 		ob:                  ob,
@@ -98,6 +100,13 @@ func newAgent(cfg config.Config, ob *outbox.Outbox, reg *metrics.Registry) *Agen
 		metricCPU:           reg.NewGauge("etd_cpu_utilization_percent", "Host CPU utilization percentage"),
 		metricMem:           reg.NewGauge("etd_mem_used_bytes", "Host used memory in bytes"),
 	}
+
+	// Establish the documented baseline quiescent ceiling (5% quota) immediately upon boot.
+	if err := agent.cgroupCtl.SetQuiescent(); err != nil {
+		slog.Warn("failed to initialize quiescent cgroup quota", "error", err)
+	}
+
+	return agent
 }
 
 func computeInterval(z, tauMin, tauMax, theta float64) time.Duration {
@@ -119,6 +128,12 @@ func computeInterval(z, tauMin, tauMax, theta float64) time.Duration {
 func (a *Agent) tick(now time.Time) time.Duration {
 	a.metricScrapes.Inc()
 
+	elapsedSec := a.cfg.ScrapeInterval.Seconds()
+	if !a.prevTick.IsZero() && now.After(a.prevTick) {
+		elapsedSec = now.Sub(a.prevTick).Seconds()
+	}
+	a.prevTick = now
+
 	if err := collector.CollectCPU(a.cfg.ProcfsPath, &a.cpuStats); err == nil {
 		if a.hasPrevCPU && a.cpuStats.Total > a.prevCPU.Total {
 			deltaTotal := float64(a.cpuStats.Total - a.prevCPU.Total)
@@ -127,7 +142,9 @@ func (a *Agent) tick(now time.Time) time.Duration {
 			case "ticks":
 				a.metricCPU.SetFloat64(deltaWork)
 			case "hertz":
-				a.metricCPU.SetFloat64(deltaTotal / a.cfg.ScrapeInterval.Seconds())
+				if elapsedSec > 0 {
+					a.metricCPU.SetFloat64(deltaTotal / elapsedSec)
+				}
 			default:
 				a.metricCPU.SetFloat64((deltaWork / deltaTotal) * 100.0)
 			}
@@ -141,9 +158,15 @@ func (a *Agent) tick(now time.Time) time.Duration {
 	}
 
 	sample := a.aiGen.Next()
-	if a.injectSpikes.Load() > 0 {
-		sample.InferencesPerSec *= 50.0
-		a.injectSpikes.Add(-1)
+	for {
+		spikes := a.injectSpikes.Load()
+		if spikes <= 0 {
+			break
+		}
+		if a.injectSpikes.CompareAndSwap(spikes, spikes-1) {
+			sample.InferencesPerSec *= 50.0
+			break
+		}
 	}
 	a.metricThroughput.Set(uint64(sample.InferencesPerSec))
 
@@ -191,7 +214,8 @@ func (a *Agent) tick(now time.Time) time.Duration {
 	}
 
 	isDrifting := a.det.IsDrifting()
-	if isDrifting && !a.prevDrifting {
+	if isDrifting && (!a.prevDrifting || now.Sub(a.lastDriftAlert) >= a.suppCfg.HoldoffDuration) {
+		a.lastDriftAlert = now
 		payload, err := json.Marshal(DriftPayload{
 			Timestamp:  now,
 			DriftIndex: a.det.DriftIndex(),
@@ -276,7 +300,9 @@ func main() {
 			metricHTTPRequests.Inc()
 			mux.ServeHTTP(w, r)
 		}),
-		ReadTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second,
+		ReadHeaderTimeout: 3 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      10 * time.Second,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

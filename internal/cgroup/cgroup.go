@@ -1,4 +1,7 @@
+//go:build linux
+
 // Package cgroup manages Linux cgroup v2 CPU quota allocation and statistics.
+//
 package cgroup
 
 import (

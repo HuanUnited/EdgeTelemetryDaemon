@@ -2,6 +2,7 @@ package outbox
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -100,5 +101,75 @@ func TestOutboxPushPopAlloc(t *testing.T) {
 	})
 	if allocs != 0 {
 		t.Fatalf("Outbox.Push/Pop allocated %v times, want 0", allocs)
+	}
+}
+
+func TestOutboxPopWithActiveContextZeroAlloc(t *testing.T) {
+	const runs = 1000
+	ob := NewOutbox(Config{Capacity: runs + 10, DropPolicy: DropOldest})
+	defer ob.Close()
+	evt := Event{ID: "test-id", Type: EventAnomalyAlert, Timestamp: time.Now()}
+	for range runs + 10 {
+		_ = ob.Push(evt)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	allocs := testing.AllocsPerRun(runs, func() {
+		_, _ = ob.Pop(ctx)
+	})
+	if allocs != 0 {
+		t.Fatalf("Outbox.Pop with active context allocated %v times, want 0", allocs)
+	}
+}
+
+func TestOutboxPopFastPathNoAllocation(t *testing.T) {
+	const runs = 1000
+	ob := NewOutbox(Config{Capacity: runs + 10, DropPolicy: DropOldest})
+	defer ob.Close()
+
+	evt := Event{ID: "bench-id", Type: EventAnomalyAlert, Timestamp: time.Now()}
+	for range runs + 10 {
+		_ = ob.Push(evt)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	allocs := testing.AllocsPerRun(runs, func() {
+		_, err := ob.Pop(ctx)
+		if err != nil {
+			t.Fatalf("unexpected Pop error: %v", err)
+		}
+	})
+
+	if allocs != 0 {
+		t.Fatalf("Pop on populated queue with cancellable context allocated %v times, want 0", allocs)
+	}
+}
+
+func TestOutboxPopContextCancellationUnblocks(t *testing.T) {
+	ob := NewOutbox(Config{Capacity: 10, DropPolicy: DropOldest})
+	defer ob.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := ob.Pop(ctx)
+		errCh <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Pop error = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("Pop failed to unblock on context cancellation")
 	}
 }

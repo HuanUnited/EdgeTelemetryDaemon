@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/HuanUnited/edgetelemetrydaemon/internal/cgroup"
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/config"
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/metrics"
 	"github.com/HuanUnited/edgetelemetrydaemon/internal/outbox"
@@ -152,5 +154,83 @@ func TestEndToEndQuotaRegulation(t *testing.T) {
 	}
 	if string(data) != "5000 100000\n" {
 		t.Fatalf("cpu.max after recovery = %q, want %q", string(data), "5000 100000\n")
+	}
+}
+
+func TestAgentStartupQuiescentMode(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := config.Config{
+		ListenAddr:         ":0",
+		ScrapeInterval:     5 * time.Second,
+		CPUReportMode:      "percent",
+		LogLevel:           "info",
+		TargetURL:          "http://localhost:8080/ingest",
+		DetectorMinSamples: 30,
+		ProcfsPath:         tempDir,
+		RateTauMin:         50 * time.Millisecond,
+		RateTauMax:         5 * time.Second,
+		RateTheta:          3.5,
+		CgroupRoot:         tempDir,
+	}
+
+	reg := metrics.NewRegistry()
+	ob := outbox.NewOutbox(outbox.Config{Capacity: 10, DropPolicy: outbox.DropOldest})
+	defer ob.Close()
+
+	agent := newAgent(cfg, ob, reg)
+
+	if got := agent.cgroupCtl.Mode(); got != cgroup.ModeQuiescent {
+		t.Fatalf("agent startup cgroup mode = %v, want %v", got, cgroup.ModeQuiescent)
+	}
+
+	cpuMaxPath := filepath.Join(tempDir, "cpu.max")
+	data, err := os.ReadFile(cpuMaxPath)
+	if err != nil {
+		t.Fatalf("failed to read cpu.max on startup: %v", err)
+	}
+	if string(data) != "5000 100000\n" {
+		t.Fatalf("startup cpu.max = %q, want %q", string(data), "5000 100000\n")
+	}
+}
+
+func TestCPUHertzAdaptiveIntervalScaling(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := config.Config{
+		ListenAddr:         ":0",
+		ScrapeInterval:     5 * time.Second,
+		CPUReportMode:      "hertz",
+		LogLevel:           "info",
+		TargetURL:          "http://localhost:8080/ingest",
+		DetectorMinSamples: 30,
+		ProcfsPath:         tempDir,
+		RateTauMin:         50 * time.Millisecond,
+		RateTauMax:         5 * time.Second,
+		RateTheta:          3.5,
+		CgroupRoot:         tempDir,
+	}
+
+	statPath := filepath.Join(tempDir, "stat")
+	if err := os.WriteFile(statPath, []byte("cpu  100 0 100 800 0 0 0 0 0 0\n"), 0o644); err != nil {
+		t.Fatalf("write stat: %v", err)
+	}
+
+	reg := metrics.NewRegistry()
+	ob := outbox.NewOutbox(outbox.Config{Capacity: 10})
+	defer ob.Close()
+	agent := newAgent(cfg, ob, reg)
+
+	t1 := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	agent.tick(t1)
+
+	// Simulate 100ms later with 100 total ticks delta (expected 100 ticks / 0.1s = 1000 Hz)
+	if err := os.WriteFile(statPath, []byte("cpu  150 0 150 800 0 0 0 0 0 0\n"), 0o644); err != nil {
+		t.Fatalf("write stat update: %v", err)
+	}
+	t2 := t1.Add(100 * time.Millisecond)
+	agent.tick(t2)
+
+	gotHz := agent.metricCPU.Float64Value()
+	if math.Abs(gotHz-1000.0) > 1e-3 {
+		t.Fatalf("metricCPU (hertz) = %v, want 1000.0", gotHz)
 	}
 }

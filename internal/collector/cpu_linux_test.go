@@ -1,8 +1,12 @@
+//go:build linux
+
 package collector
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,10 +20,16 @@ procs_running 2
 procs_blocked 0
 `
 
-func TestParseCPULine(t *testing.T) {
+func TestCollectCPU(t *testing.T) {
+	dir := t.TempDir()
+	statPath := filepath.Join(dir, "stat")
+	if err := os.WriteFile(statPath, []byte(sampleProcStat), 0o644); err != nil {
+		t.Fatalf("write sample stat: %v", err)
+	}
+
 	var out CPUStats
-	if err := parseCPULine([]byte(sampleProcStat), &out); err != nil {
-		t.Fatalf("parseCPULine() returned error: %v", err)
+	if err := CollectCPU(dir, &out); err != nil {
+		t.Fatalf("CollectCPU(%q) failed: %v", dir, err)
 	}
 
 	want := CPUStats{
@@ -38,16 +48,25 @@ func TestParseCPULine(t *testing.T) {
 		out.Idle != want.Idle || out.Iowait != want.Iowait || out.Irq != want.Irq ||
 		out.Softirq != want.Softirq || out.Steal != want.Steal || out.Guest != want.Guest ||
 		out.GuestN != want.GuestN {
-		t.Errorf("parseCPULine() = %+v, want %+v", out, want)
+		t.Errorf("CollectCPU() = %+v, want %+v", out, want)
 	}
 
 	wantTotal := uint64(100 + 5 + 200 + 300 + 40 + 10 + 20 + 30 + 5 + 2)
 	if out.Total != wantTotal {
 		t.Errorf("Total = %d, want %d", out.Total, wantTotal)
 	}
+
+	// Verify trailing slash handling does not corrupt stack buffer path
+	var outTrailing CPUStats
+	if err := CollectCPU(dir+"/", &outTrailing); err != nil {
+		t.Fatalf("CollectCPU(%q) with trailing slash failed: %v", dir+"/", err)
+	}
+	if outTrailing.Total != wantTotal {
+		t.Errorf("CollectCPU with trailing slash Total = %d, want %d", outTrailing.Total, wantTotal)
+	}
 }
 
-func TestParseCPULineMalformed(t *testing.T) {
+func TestCollectCPUMalformed(t *testing.T) {
 	tests := []struct {
 		name string
 		line string
@@ -60,33 +79,31 @@ func TestParseCPULineMalformed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(tt.line), 0o644); err != nil {
+				t.Fatalf("write malformed stat: %v", err)
+			}
 			var out CPUStats
-			if err := parseCPULine([]byte(tt.line), &out); err == nil {
-				t.Errorf("parseCPULine(%q) = nil error, want error", tt.line)
+			if err := CollectCPU(dir, &out); err == nil {
+				t.Errorf("CollectCPU(%q) = nil error, want error", tt.line)
 			}
 		})
 	}
 }
 
-func TestScrapeProcStat(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "stat")
-	if err := os.WriteFile(path, []byte(sampleProcStat), 0o644); err != nil {
-		t.Fatalf("write sample stat: %v", err)
-	}
-
+func TestCollectCPUMissingFile(t *testing.T) {
 	var out CPUStats
-	if err := scrapeProcStat(path, &out); err != nil {
-		t.Fatalf("scrapeProcStat() returned error: %v", err)
-	}
-	if out.User != 100 || out.System != 200 {
-		t.Errorf("scrapeProcStat() = %+v, want User=100 System=200", out)
+	if err := CollectCPU(filepath.Join(t.TempDir(), "nonexistent"), &out); err == nil {
+		t.Fatalf("CollectCPU on missing directory = nil error, want error")
 	}
 }
 
-func TestScrapeProcStatMissingFile(t *testing.T) {
+func TestCollectCPUPathTooLong(t *testing.T) {
+	longPath := "/" + strings.Repeat("a", 260)
 	var out CPUStats
-	if err := scrapeProcStat(filepath.Join(t.TempDir(), "nope"), &out); err == nil {
-		t.Fatalf("scrapeProcStat() on missing file = nil error, want error")
+	err := CollectCPU(longPath, &out)
+	if !errors.Is(err, errPathTooLong) {
+		t.Fatalf("CollectCPU(longPath) err = %v, want %v", err, errPathTooLong)
 	}
 }
 

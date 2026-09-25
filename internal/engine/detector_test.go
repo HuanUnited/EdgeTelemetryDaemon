@@ -244,3 +244,61 @@ func FuzzZScoreNoPanic(f *testing.F) {
 		}
 	})
 }
+
+func TestZScoreDetectorNonFiniteGuards(t *testing.T) {
+	d := NewZScoreDetector(0.1, 0.01, 30, 3.5, 0.15)
+	for range 50 {
+		d.Update(100.0)
+	}
+
+	if d.Update(math.NaN()) {
+		t.Fatalf("Update(NaN) returned true, want false")
+	}
+	if d.Update(math.Inf(1)) {
+		t.Fatalf("Update(+Inf) returned true, want false")
+	}
+	if d.Update(math.Inf(-1)) {
+		t.Fatalf("Update(-Inf) returned true, want false")
+	}
+
+	if math.IsNaN(d.Baseline()) || math.IsInf(d.Baseline(), 0) {
+		t.Fatalf("detector baseline poisoned by non-finite input: %v", d.Baseline())
+	}
+
+	// Ensure normal spike detection remains functional
+	if !d.Update(10000.0) {
+		t.Fatalf("legitimate spike after non-finite rejection was not detected")
+	}
+}
+
+func TestDualHorizonRampInvariance(t *testing.T) {
+	// alphaFast = 1.0 absorbs instantaneous step increments (dev = x - base = 0)
+	d := NewZScoreDetector(1.0, 0.001, 30, 3.5, 0.20)
+
+	for range 100 {
+		d.Update(50.0)
+	}
+
+	for i := 1; i <= 1000; i++ {
+		val := 50.0 + float64(i)*0.1
+		flagged := d.Update(val)
+
+		// 1. A smooth ramp must never trigger single-sample Z-score anomalies
+		if flagged {
+			t.Fatalf("sample %d: ramp unexpectedly flagged as anomaly", d.Count())
+		}
+
+		// 2. With alphaFast = 1.0, deviation from fast baseline is identically zero
+		if gotZ := math.Abs(d.ZScore()); gotZ != 0 {
+			t.Fatalf("sample %d: |ZScore()| = %v, want 0 for alphaFast=1.0", d.Count(), gotZ)
+		}
+	}
+
+	// 3. Concept drift must be flagged as slow EWMA diverges from fast EWMA
+	if !d.IsDrifting() {
+		t.Fatalf("detector failed to signal concept drift by end of ramp")
+	}
+	if d.DriftIndex() < d.DriftThreshold() {
+		t.Fatalf("DriftIndex() = %v, want >= DriftThreshold %v", d.DriftIndex(), d.DriftThreshold())
+	}
+}

@@ -33,21 +33,30 @@ var (
 // CollectCPU populates out with aggregate CPU tick counters read from
 // DefaultProcStatPath. No heap allocations occur on the success path.
 func CollectCPU(procPath string, out *CPUStats) error {
-	return scrapeProcStat(procPath+"/stat", out)
+	return scrapeProcPath(procPath, "stat", out)
 }
 
-// scrapeProcStat reads the first line of the file at path (expected to be
+// scrapeProcPath reads the first line of the file at path (expected to be
 // /proc/stat) and parses the aggregate "cpu" row into out. The caller supplies
 // the output value by pointer so that the method allocates nothing on the hot
 // path. out.Total is computed after parsing; any counters reported by the kernel
 // beyond GuestN are ignored, matching the fields enumerated by CPUStats.
-func scrapeProcStat(path string, out *CPUStats) error {
-	if len(path) >= 256 {
+func scrapeProcPath(dir, filename string, out *CPUStats) error {
+	totalLen := len(dir) + 1 + len(filename)
+	if totalLen >= 256 {
 		return errPathTooLong
 	}
+
 	var pathBuf [256]byte
-	copy(pathBuf[:], path)
-	pathBuf[len(path)] = 0
+	n := copy(pathBuf[:], dir)
+	if n > 0 && pathBuf[n-1] == '/' {
+		n += copy(pathBuf[n:], filename)
+	} else {
+		pathBuf[n] = '/'
+		n++
+		n += copy(pathBuf[n:], filename)
+	}
+	pathBuf[n] = 0
 
 	fd, _, errno := syscall.Syscall6(sysOPENAT, atFDCWD, uintptr(unsafe.Pointer(&pathBuf[0])), uintptr(syscall.O_RDONLY), 0, 0, 0)
 	if errno != 0 {
@@ -58,11 +67,11 @@ func scrapeProcStat(path string, out *CPUStats) error {
 	}()
 
 	var buf [512]byte
-	n, _, rerr := syscall.Syscall(sysREAD, fd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	readN, _, rerr := syscall.Syscall(sysREAD, fd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if rerr != 0 {
 		return errReadStat
 	}
-	return parseCPULine(buf[:n], out)
+	return parseCPULine(buf[:readN], out)
 }
 
 // parseCPULine parses a single /proc/stat "cpu" line. It expects the data to

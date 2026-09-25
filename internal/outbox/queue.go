@@ -119,7 +119,12 @@ func (o *Outbox) Pop(ctx context.Context) (Event, error) {
 		return Event{}, err
 	}
 
-	if ctx.Done() != nil {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	// Fast path: if items are already present, dequeue immediately with zero allocations
+	// and zero background goroutines regardless of context cancellability.
+	if o.count == 0 && ctx.Done() != nil {
 		stop := make(chan struct{})
 		defer close(stop)
 
@@ -130,35 +135,40 @@ func (o *Outbox) Pop(ctx context.Context) (Event, error) {
 			case <-stop:
 			}
 		}()
-	}
 
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
-	for {
-		if o.count > 0 {
-			evt := o.items[o.head]
-			o.items[o.head] = Event{} // Clear reference to allow GC
-			o.head = (o.head + 1) % o.capacity
-			o.count--
-			o.dequeued++
-			return evt, nil
+		for o.count == 0 {
+			if o.closed {
+				return Event{}, ErrQueueClosed
+			}
+			if err := ctx.Err(); err != nil {
+				return Event{}, err
+			}
+			o.cond.Wait()
+			if err := ctx.Err(); err != nil {
+				return Event{}, err
+			}
 		}
-
-		if o.closed {
-			return Event{}, ErrQueueClosed
-		}
-
-		if err := ctx.Err(); err != nil {
-			return Event{}, err
-		}
-
-		o.cond.Wait()
-
-		if err := ctx.Err(); err != nil {
-			return Event{}, err
+	} else {
+		for o.count == 0 {
+			if o.closed {
+				return Event{}, ErrQueueClosed
+			}
+			if err := ctx.Err(); err != nil {
+				return Event{}, err
+			}
+			o.cond.Wait()
+			if err := ctx.Err(); err != nil {
+				return Event{}, err
+			}
 		}
 	}
+
+	evt := o.items[o.head]
+	o.items[o.head] = Event{} // Clear reference to allow GC
+	o.head = (o.head + 1) % o.capacity
+	o.count--
+	o.dequeued++
+	return evt, nil
 }
 
 // Len returns the current number of queued events.

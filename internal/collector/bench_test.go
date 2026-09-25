@@ -6,39 +6,50 @@ import (
 	"testing"
 )
 
-// benchFixture writes sampleProcStat / sampleMemInfo into a temp file and
-// returns its path, so benchmarks measure the scrape path (open, read, parse)
-// and not file construction.
-func benchFixture(tb testing.TB, name, content string) string {
+// createProcFixture initializes a mock procfs directory containing stat and meminfo files.
+func createProcFixture(tb testing.TB) string {
 	tb.Helper()
-	path := filepath.Join(tb.TempDir(), name)
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		tb.Fatalf("write %s fixture: %v", name, err)
+	dir := tb.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(sampleProcStat), 0o644); err != nil {
+		tb.Fatalf("write stat fixture: %v", err)
 	}
-	return path
+	if err := os.WriteFile(filepath.Join(dir, "meminfo"), []byte(sampleMemInfo), 0o644); err != nil {
+		tb.Fatalf("write meminfo fixture: %v", err)
+	}
+	return dir
 }
 
 func BenchmarkCollectCPU(b *testing.B) {
-	path := benchFixture(b, "stat", sampleProcStat)
+	dir := b.TempDir()
+	statPath := filepath.Join(dir, "stat")
+	if err := os.WriteFile(statPath, []byte(sampleProcStat), 0o644); err != nil {
+		b.Fatalf("write stat fixture: %v", err)
+	}
+
 	var out CPUStats
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := scrapeProcStat(path, &out); err != nil {
-			b.Fatalf("scrapeProcStat: %v", err)
+		if err := CollectCPU(dir, &out); err != nil {
+			b.Fatalf("CollectCPU: %v", err)
 		}
 	}
 	_ = out
 }
 
 func BenchmarkCollectMem(b *testing.B) {
-	path := benchFixture(b, "meminfo", sampleMemInfo)
+	dir := b.TempDir()
+	memPath := filepath.Join(dir, "meminfo")
+	if err := os.WriteFile(memPath, []byte(sampleMemInfo), 0o644); err != nil {
+		b.Fatalf("write meminfo fixture: %v", err)
+	}
+
 	var out MemStats
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := scrapeProcMemInfo(path, &out); err != nil {
-			b.Fatalf("scrapeProcMemInfo: %v", err)
+		if err := CollectMem(dir, &out); err != nil {
+			b.Fatalf("CollectMem: %v", err)
 		}
 	}
 	_ = out
@@ -65,4 +76,40 @@ func BenchmarkParseCPULine(b *testing.B) {
 		}
 	}
 	_ = out
+}
+
+func TestCollectCPUAlloc(t *testing.T) {
+	dir := createProcFixture(t)
+	var out CPUStats
+
+	// Warm-up run
+	if err := CollectCPU(dir, &out); err != nil {
+		t.Fatalf("warm-up CollectCPU failed: %v", err)
+	}
+
+	const runs = 1000
+	allocs := testing.AllocsPerRun(runs, func() {
+		_ = CollectCPU(dir, &out)
+	})
+	if allocs != 0 {
+		t.Fatalf("CollectCPU allocated %v times, want 0", allocs)
+	}
+}
+
+func TestCollectMemAlloc(t *testing.T) {
+	dir := createProcFixture(t)
+	var out MemStats
+
+	// Warm-up run
+	if err := CollectMem(dir, &out); err != nil {
+		t.Fatalf("warm-up CollectMem failed: %v", err)
+	}
+
+	const runs = 1000
+	allocs := testing.AllocsPerRun(runs, func() {
+		_ = CollectMem(dir, &out)
+	})
+	if allocs != 0 {
+		t.Fatalf("CollectMem allocated %v times, want 0", allocs)
+	}
 }
