@@ -4,7 +4,7 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/HuanUnited/edgetelemetrydaemon)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Edge Telemetry Daemon (ETD) is a high-throughput, low-footprint telemetry collector and closed-loop anomaly-driven resource governor built for Linux edge devices, robotics, and AI inference systems.
+Edge Telemetry Daemon (ETD) is a high-throughput, low-footprint telemetry collector and closed-loop anomaly-driven resource self-governor built for Linux edge devices, robotics, and AI inference systems.
 
 It acts as an **Edge Black-Box Flight Recorder**, solving the *Edge Telemetry Dilemma* (the tradeoff between cellular bandwidth costs and high-resolution observability). ETD idles at a low polling rate, maintaining a rolling in-memory context window. Upon detecting statistical anomalies or concept drift, it dynamically drops its polling interval to capture ultra-high-resolution telemetry, buffers the pre-incident context, and streams it via Unix Domain Sockets (UDS), HTTP Server-Sent Events (SSE), and outbound webhooks.
 
@@ -40,7 +40,7 @@ Configuration is environment-driven. Default values are optimized for edge envir
 
 ##  Setup & Integration Guide
 
-ETD can be run in **Telemetry-only Mode** (default, standalone monitoring) or **Active Governor Mode** (delegated cgroups, allowing ETD to throttle background processes).
+ETD can be run in **Telemetry-only Mode** (default, standalone monitoring) or **Active Governor Mode** (delegated cgroups, allowing ETD to throttle itself).
 
 ### Method A: Standalone Telemetry (Quick Start)
 The easiest way to get started. No root required. ETD will gracefully degrade to read-only mode and monitor the host.
@@ -54,7 +54,7 @@ make build
 ```
 
 ### Method B: Active Governor (systemd cgroup v2)
-To allow ETD to actively manage CPU quotas (Quiescent ⇄ Burst modes), run it under a delegated `systemd` scope so it has write access to `cpu.max`.
+To allow ETD to actively manage the CPU quota of itself (Quiescent ⇄ Burst modes), run it under a delegated `systemd` scope so it has write access to `cpu.max`.
 
 ```bash
 # Run with active cgroup governance
